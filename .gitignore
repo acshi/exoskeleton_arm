@@ -1,0 +1,5 @@
+// temp files
+*#
+*.vs
+*Release
+*Debug
