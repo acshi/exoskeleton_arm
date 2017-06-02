@@ -63,7 +63,8 @@ Change Activity:
 #endif
 
 #if defined(__AVR_ATtiny84__) | \
-     defined(__AVR_ATtiny44__)
+     defined(__AVR_ATtiny44__) | \
+     defined(__AVR_ATtiny24__)
 #  define DDR_USI             DDRA
 #  define PORT_USI            PORTA
 #  define PIN_USI             PINA

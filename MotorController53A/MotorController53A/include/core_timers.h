@@ -504,6 +504,11 @@ __attribute__((always_inline)) static inline void Timer0_SetOutputCompareMatchB(
 __attribute__((always_inline)) static inline void Timer0_EnableOutputCompareInterruptA( void )
 {
   TIMSK0 |= (1<<OCIE0A);
+}
+
+__attribute__((always_inline)) static inline void Timer0_EnableOutputCompareInterruptB( void )
+{
+  TIMSK0 |= (1<<OCIE0B);
 } 
 
 __attribute__((always_inline)) static inline void Timer0_EnableOverflowInterrupt( void )

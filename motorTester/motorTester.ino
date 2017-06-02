@@ -2,7 +2,7 @@
 
 #include <Wire.h>
 
-#define GEAR_BOX_ADDRESS_1 23
+#define GEAR_BOX_ADDRESS_1 16
 #define GEAR_BOX_ADDRESS_2 22
 
 #define SET_RAW_MOTOR_MSG 1
@@ -12,7 +12,6 @@
 #define READ_CURRENT_MSG 5
 #define DIAGNOSTIC_MSG 11
 #define ADDRESS_MSG 12
-#define VALUE_TEST_MSG 13
 
 void setup() {
   // put your setup code here, to run once:
@@ -22,13 +21,13 @@ void setup() {
   Serial << "Ready!\n";
 }
 
-int16_t sendMessage(uint8_t command, int address) {
+uint16_t sendMessage(uint8_t command, int address) {
   Wire.beginTransmission(address);
   Wire.write(command);
   Wire.endTransmission();
-  delay(5);
+  delayMicroseconds(100);
   Wire.requestFrom(address, 2, true);
-  return (int16_t)(Wire.read() << 8) | Wire.read();
+  return (uint16_t)(Wire.read() << 8) | Wire.read();
 }
 
 void sendMessageValue(uint8_t command, int16_t value, int address) {
@@ -39,17 +38,17 @@ void sendMessageValue(uint8_t command, int16_t value, int address) {
   Wire.endTransmission();
 }
 
-void performAction(int16_t action, int address) {
-    int16_t value;
+bool performAction(int16_t action, int address) {
+    uint16_t value;
     switch (action) {
       case 'sr':
-        value = (int16_t)Serial.parseInt();
-        Serial << "Setting raw motor output to: " << value << endl;
+        value = (uint16_t)Serial.parseInt();
+        Serial << "Setting raw motor output to: " << (int16_t)value << endl;
         sendMessageValue(SET_RAW_MOTOR_MSG, value, address);
         break;
       case 'gr':
         value = sendMessage(READ_RAW_MOTOR_MSG, address);
-        Serial << "Raw motor output: " << value << endl;
+        Serial << "Raw motor output: " << (int16_t)value << endl;
         break;
       case 'sl':
         value = (int16_t)Serial.parseInt();
@@ -72,27 +71,27 @@ void performAction(int16_t action, int address) {
         value = sendMessage(ADDRESS_MSG, address);
         Serial << "TWI Address: " << value << endl;
         break;
-      case 'ts':
-        value = sendMessage(VALUE_TEST_MSG, address);
-        Serial << "Test Value: " << value << endl;
-        break;
       default:
-        Serial << "Command not recognized: " << (char)(action >> 8) << (char)action << endl;
-        break;
+        //Serial << "Command not recognized: " << (char)(action >> 8) << ',' << (char)action << endl;
+        return false;
     }
+    return true;
 }
 
 void loop() {
-  byte byte0 = 0;
-  byte byte1 = 0;
+  static byte byte0 = 0;
+  static byte byte1 = 0;
   if (Serial.available()) {
     byte b = Serial.read();
 
-    if (b == '\n' || b == '\r') {
-      performAction((byte0 << 8) & byte1, GEAR_BOX_ADDRESS_1);
-    } else {
-      byte0 = byte1;
-      byte1 = b;
+    byte0 = byte1;
+    byte1 = b;
+
+    if (byte0 != 0 && byte1 != 0) {
+      if (performAction((byte0 << 8) | byte1, GEAR_BOX_ADDRESS_1)) {
+        byte0 = 0;
+        byte1 = 0;
+      }
     }
   }
 }

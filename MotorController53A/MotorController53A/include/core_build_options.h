@@ -77,7 +77,7 @@
 /*
   The old standby ... millis on Timer 0.
 */
-#define TIMER_TO_USE_FOR_MILLIS                   0
+#define TIMER_TO_USE_FOR_MILLIS                   1
 
 /*
   Tone goes on whichever timer was not used for millis.

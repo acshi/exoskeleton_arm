@@ -1,11 +1,19 @@
 ﻿#include <Arduino.h>
 #include <core_timers.h>
 #include <core_adc.h>
-//#include <USI_TWI_Slave.h>
 #include <TinyWireS.h>
 
 #define MOTOR_FORWARD_PIN PIN_A7
 #define MOTOR_BACKWARD_PIN PIN_B2
+
+#define MOTOR_FORWARD_ON(); PORTA |= _BV(PORTA7);
+#define MOTOR_FORWARD_OFF(); PORTA &= ~_BV(PORTA7);
+#define MOTOR_FORWARD_TOGGLE(); PINA |= _BV(PORTA7);
+
+#define MOTOR_BACKWARD_ON(); PORTB |= _BV(PORTB2);
+#define MOTOR_BACKWARD_OFF(); PORTB &= ~_BV(PORTB2);
+#define MOTOR_BACKWARD_TOGGLE(); PINB |= _BV(PORTB2);
+
 #define SENSE_FORWARD_PIN PIN_A1
 #define SENSE_BACKWARD_PIN PIN_A0
 #define SENSE_CMP_GND PIN_A5
@@ -31,7 +39,6 @@ uint16_t currentVal = 0;
 #define READ_CURRENT_MSG 5
 #define DIAGNOSTIC_MSG 11
 #define ADDRESS_MSG 12
-#define VALUE_TEST_MSG 13
 
 bool receivingSetRawMotor = false;
 bool receivingSetCurrentLimit = false;
@@ -39,10 +46,9 @@ bool hasHighByte = false;
 byte setValueHighByte;
 
 // Motor
-#define MOTOR_PWM_MAX 1000
-#define MOTOR_PWM_MIN 0
+#define MOTOR_PWM_MAX 248
 
-int16_t lastMotorOutput = 0;
+int16_t lastMotorOutput = (MOTOR_PWM_MAX + 1);
 int16_t motorOutput = 0;
 
 // We do not need the full 32-bit resolution of millis, so we save space by doing 16-bit operations
@@ -52,17 +58,17 @@ uint16_t millis16() {
 }
 
 void setupTimerInterrupts() {
-    Timer1_SetToPowerup(); // Turn all settings off!
+    Timer0_SetToPowerup(); // Turn all settings off!
 
-     // These settings should give us 8Mhz / 2 / 1 / 191 = 20942Hz ~= 21khz PWM
-    ICR1 = 191;
-    Timer1_SetWaveformGenerationMode(Timer1_Phase_Frequency_PWM_ICR); // Top is ICR1, OCR1A is used to modify duty cycle
-    Timer1_ClockSelect(Timer1_Prescale_Value_1);
+     // These settings should give us   8Mhz / 2 / 1 / 191 = 20942Hz ~= 21khz PWM
+     // Or we can have...               8Mhz / 2 / 1 / 250 = 16000Hz  = 16khz PWM
+    //OCR0A = MOTOR_PWM_MAX;
+    Timer0_SetWaveformGenerationMode(Timer0_Phase_Correct_PWM_FF); // Top is 255, OCR0A is used to modify duty cycle
+    Timer0_ClockSelect(Timer0_Prescale_Value_1);
 
-    Timer1_SetOutputCompareMatchA(0); // Set pulse width
-
-    Timer1_EnableOverflowInterrupt();
-    Timer1_EnableOutputCompareInterruptA();
+    //Timer0_EnableOutputCompareInterruptA();
+    //Timer0_EnableOutputCompareInterruptB();
+    //Timer0_EnableOverflowInterrupt();
 }
 
 // Does a raw ADC reading with whatever settings are already set
@@ -84,39 +90,69 @@ void setupDifferentialGainAdc() {
 
     // let the ADC settle...
     uint16_t settleStart = millis16();
-    while ((uint8_t)(millis16() - settleStart) < 2) {}
+    while ((uint8_t)(millis16() - settleStart) < 1) {}
 
     // use second read to get gain offset
     adcGainOffset = (int8_t)readAdc();
 }
 
-ISR(TIMER1_OVF_vect) {
+/*ISR(TIMER1_OVF_vect) {
     if (motorOutput < 0) {
-        digitalWrite(MOTOR_BACKWARD_PIN, HIGH);
+        //digitalWrite(MOTOR_BACKWARD_PIN, HIGH);
+        MOTOR_BACKWARD_ON();
     } else if (motorOutput > 0) {
-        digitalWrite(MOTOR_FORWARD_PIN, HIGH);
+        //digitalWrite(MOTOR_FORWARD_PIN, HIGH);
+        MOTOR_FORWARD_ON();
     }
+}*/
+
+/*ISR(TIMER0_COMPA_vect) {
+    adcGainOffset++;
 }
 
-ISR(TIMER1_COMPA_vect) {
-    if (!Timer1_IsOverflowSet()) {
+ISR(TIMER0_COMPB_vect) {
+    adcGainOffset--;
+}
+
+ISR(TIMER0_OVF_vect) {
+    adcGainOffset++;
+}*/
+
+/*ISR(TIMER1_COMPA_vect) {
+    uint8_t TCNT1L_1 = TCNT1L;
+    uint8_t TCNT1L_2 = TCNT1L;
+    if (TCNT1L_2 < TCNT1L_1) {
         if (motorOutput < 0) {
-            digitalWrite(MOTOR_BACKWARD_PIN, LOW);
+            MOTOR_BACKWARD_ON();
         } else if(motorOutput > 0) {
-            digitalWrite(MOTOR_FORWARD_PIN, LOW);
+            MOTOR_FORWARD_ON();
+        }
+    } else {
+        if (motorOutput < 0) {
+            MOTOR_BACKWARD_OFF();
+        } else if(motorOutput > 0) {
+            MOTOR_FORWARD_OFF();
         }
     }
-}
+}*/
 
 void updateMotor() {
     if (motorOutput != lastMotorOutput) {
         lastMotorOutput = motorOutput;
-        digitalWrite(MOTOR_FORWARD_PIN, LOW);
-        digitalWrite(MOTOR_BACKWARD_PIN, LOW);
+        //digitalWrite(MOTOR_FORWARD_PIN, LOW);
+        //digitalWrite(MOTOR_BACKWARD_PIN, LOW);
+        MOTOR_FORWARD_OFF();
+        MOTOR_BACKWARD_OFF();
         if (motorOutput < 0) {
-            Timer1_SetOutputCompareMatchA(-motorOutput);
+            Timer0_SetCompareOutputModeB(Timer0_Disconnected);
+
+            Timer0_SetOutputCompareMatchA(-motorOutput);
+            Timer0_SetCompareOutputModeA(Timer0_Clear);
         } else if (motorOutput > 0) {
-            Timer1_SetOutputCompareMatchA(motorOutput);
+            Timer0_SetCompareOutputModeA(Timer0_Disconnected);
+
+            Timer0_SetOutputCompareMatchB(motorOutput);
+            Timer0_SetCompareOutputModeB(Timer0_Clear);
         }
     }
 }
@@ -126,22 +162,23 @@ void updateControl() {
         byte newByte = TinyWireS.receive();
 
         if (receivingSetRawMotor | receivingSetCurrentLimit) {
-            if (~hasHighByte) {
+            if (!hasHighByte) {
                 setValueHighByte = newByte;
                 hasHighByte = true;
             } else {
-                int value = (setValueHighByte << 8) + newByte;
+                int16_t value = (setValueHighByte << 8) | newByte;
                 if (receivingSetRawMotor) {
-                    if (value < MOTOR_PWM_MIN) {
-                        value = MOTOR_PWM_MIN;
-                    } else if (value > MOTOR_PWM_MAX) {
+                    if (value > MOTOR_PWM_MAX) {
                         value = MOTOR_PWM_MAX;
+                    } else if (value < -MOTOR_PWM_MAX) {
+                        value = -MOTOR_PWM_MAX;
                     }
                     motorOutput = value;
                     receivingSetRawMotor = false;
                 } else {
                     // receivingSetCurrentLimit
-                    if (value > MAX_CURRENT_LIMIT) {
+                    // simultaneously prevent negative values and too high values
+                    if ((uint16_t)value > MAX_CURRENT_LIMIT) {
                         value = MAX_CURRENT_LIMIT;
                     }
                     currentLimit = value;
@@ -177,10 +214,6 @@ void updateControl() {
                     TinyWireS.send(0);
                     TinyWireS.send(twiAddress);
                     break;
-                case VALUE_TEST_MSG:
-                    TinyWireS.send((1023 >> 8) & 0xff);
-                    TinyWireS.send(1023 & 0xff);
-                    break;
             }
         }
     }
@@ -201,13 +234,25 @@ void updateCurrentControl() {
     } else if (motorOutput > 0) {
         // ADC1-ADC3 20x Gain differential ADC mode = 001111
         ADMUX = (0b10000000 | 0b001111);
+    } else {
+        currentVal = 0;
+        return;
     }
     
-    currentVal = readAdc() - adcGainOffset;
-    if (currentVal > currentLimit) {
+    uint16_t current = readAdc();
+    
+    if (current < adcGainOffset) {
+        current = 0;
+    } else {
+        current -= adcGainOffset;
+    }
+
+    if (current > currentLimit) {
         motorOutput = (motorOutput * 30) >> 5;
         // multiplying by 30 >> 5 = 0.9375 each stage gives cutback to 52% in .1 seconds
     }
+
+    currentVal = current;
 }
 
 void setup() {
@@ -215,22 +260,20 @@ void setup() {
     pinMode(JUMPER_1_PIN, INPUT_PULLUP);
     pinMode(JUMPER_2_PIN, INPUT_PULLUP);
     pinMode(JUMPER_3_PIN, INPUT_PULLUP);
-    pinMode(MOTOR_FORWARD_PIN, OUTPUT);
-    pinMode(MOTOR_BACKWARD_PIN, OUTPUT);*/
+    pinMode(MOTOR_FORWARD_PIN, INPUT);
+    pinMode(MOTOR_BACKWARD_PIN, INPUT);*/
     // equivalent but optimized...
-    DDRA = 0b00001100;
-    DDRB = 0b00000011;
-    PINA |= 0b00001100;
-    PINB |= 0b00000011;
+    DDRA = 0b11110011;
+    DDRB = 0b11111100;
+    PORTA = 0b00001100;
+    PORTB = 0b00000011;
 
-    // We start with one high bit, because the low addresses
-    // from 0 to 7 or so are reserved.
-    // Our address range is 8 to 23
-    uint8_t addr = 8;
-    addr = (uint8_t)(addr + digitalRead(JUMPER_0_PIN));
-    addr = (uint8_t)(addr + (uint8_t)(digitalRead(JUMPER_1_PIN) << (uint8_t)1));
-    addr = (uint8_t)(addr + (uint8_t)(digitalRead(JUMPER_2_PIN) << (uint8_t)2));
-    addr = (uint8_t)(addr + (uint8_t)(digitalRead(JUMPER_3_PIN) << (uint8_t)3));
+    // Our address range is 8 to 23 because 0 to 7 are reserved.
+    uint8_t addr = 23;
+    addr = (uint8_t)(addr - digitalRead(JUMPER_0_PIN));
+    addr = (uint8_t)(addr - (uint8_t)(digitalRead(JUMPER_1_PIN) << (uint8_t)1));
+    addr = (uint8_t)(addr - (uint8_t)(digitalRead(JUMPER_2_PIN) << (uint8_t)2));
+    addr = (uint8_t)(addr - (uint8_t)(digitalRead(JUMPER_3_PIN) << (uint8_t)3));
     twiAddress = addr;
 
     TinyWireS.begin(twiAddress);
@@ -239,8 +282,6 @@ void setup() {
     setupTimerInterrupts();
 
     motorOutput = 0;
-    digitalWrite(MOTOR_FORWARD_PIN, LOW);
-    digitalWrite(MOTOR_BACKWARD_PIN, LOW);
     updateMotor();
 }
 
