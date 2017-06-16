@@ -39,11 +39,11 @@ uint16_t currentVal = 0;
 #define READ_CURRENT_MSG 5
 #define DIAGNOSTIC_MSG 11
 #define ADDRESS_MSG 12
+#define MSG_END_BYTE 0xed
+#define VAL_END_BYTE 0xec
 
 bool receivingSetRawMotor = false;
 bool receivingSetCurrentLimit = false;
-bool hasHighByte = false;
-byte setValueHighByte;
 
 // Motor
 #define MOTOR_PWM_MAX 248
@@ -141,16 +141,14 @@ void updateMotor() {
         lastMotorOutput = motorOutput;
         //digitalWrite(MOTOR_FORWARD_PIN, LOW);
         //digitalWrite(MOTOR_BACKWARD_PIN, LOW);
+        Timer0_SetCompareOutputModeA(Timer0_Disconnected);
+        Timer0_SetCompareOutputModeB(Timer0_Disconnected);
         MOTOR_FORWARD_OFF();
         MOTOR_BACKWARD_OFF();
         if (motorOutput < 0) {
-            Timer0_SetCompareOutputModeB(Timer0_Disconnected);
-
             Timer0_SetOutputCompareMatchA(-motorOutput);
             Timer0_SetCompareOutputModeA(Timer0_Clear);
         } else if (motorOutput > 0) {
-            Timer0_SetCompareOutputModeA(Timer0_Disconnected);
-
             Timer0_SetOutputCompareMatchB(motorOutput);
             Timer0_SetCompareOutputModeB(Timer0_Clear);
         }
@@ -158,36 +156,49 @@ void updateMotor() {
 }
 
 void updateControl() {
-    while (TinyWireS.available()) {
-        byte newByte = TinyWireS.receive();
+    // to help deal with interference from motor noise,
+    // we collect the bytes here in this buffer
+    // we accept a single "new byte" when the first two byte values are equal
+    // and the third byte is the MSG_END_BYTE
+    static uint8_t receiveBuffer[5];
 
-        if (receivingSetRawMotor | receivingSetCurrentLimit) {
-            if (!hasHighByte) {
-                setValueHighByte = newByte;
-                hasHighByte = true;
-            } else {
-                int16_t value = (setValueHighByte << 8) | newByte;
-                if (receivingSetRawMotor) {
-                    if (value > MOTOR_PWM_MAX) {
-                        value = MOTOR_PWM_MAX;
-                    } else if (value < -MOTOR_PWM_MAX) {
-                        value = -MOTOR_PWM_MAX;
-                    }
+    while (TinyWireS.available()) {
+        for (uint8_t i = 0; i < 4; i++) {
+            receiveBuffer[i] = receiveBuffer[i + 1];
+        }
+        receiveBuffer[4] = TinyWireS.receive();
+
+        bool gotMsg = (receiveBuffer[2] == receiveBuffer[3]) & (receiveBuffer[4] == MSG_END_BYTE);
+        bool gotValue = (receiveBuffer[0] == receiveBuffer[2]) & (receiveBuffer[1] == receiveBuffer[3]) & (receiveBuffer[4] == VAL_END_BYTE);
+
+        if (!gotMsg & !gotValue) {
+            /*for (uint8_t i = 0; i < 5; i++) {
+                TinyWireS.send(receiveBuffer[i]);
+            }
+            TinyWireS.send(240);*/
+            continue;
+        }
+
+        if (gotValue & (receivingSetRawMotor | receivingSetCurrentLimit)) {
+            int16_t value = (receiveBuffer[0] << 8) | receiveBuffer[1];
+            if (receivingSetRawMotor) {
+                if ((value <= MOTOR_PWM_MAX) & (value >= -MOTOR_PWM_MAX)) {
                     motorOutput = value;
-                    receivingSetRawMotor = false;
-                } else {
-                    // receivingSetCurrentLimit
-                    // simultaneously prevent negative values and too high values
-                    if ((uint16_t)value > MAX_CURRENT_LIMIT) {
-                        value = MAX_CURRENT_LIMIT;
-                    }
-                    currentLimit = value;
-                    receivingSetCurrentLimit = false;
                 }
-                hasHighByte = false;
+                receivingSetRawMotor = false;
+            } else {
+                // receivingSetCurrentLimit
+                // simultaneously prevent negative values and too high values
+                if ((uint16_t)value <= MAX_CURRENT_LIMIT) {
+                    currentLimit = value;
+                }
+                receivingSetCurrentLimit = false;
             }
         } else {
-            switch (newByte) {
+            receivingSetRawMotor = false;
+            receivingSetCurrentLimit = false;
+
+            switch (receiveBuffer[3]) {
                 case SET_RAW_MOTOR_MSG:
                     receivingSetRawMotor = true;
                     break;
