@@ -32,8 +32,8 @@ uint16_t currentLimit = 140; // default ~30A limit
 uint16_t currentVal = 0;
 
 // Communication
-#define SET_RAW_MOTOR_MSG 1
-#define READ_RAW_MOTOR_MSG 2
+#define SET_MOTOR_MSG 1
+#define READ_MOTOR_MSG 2
 #define SET_CURRENT_LIMIT_MSG 3
 #define GET_CURRENT_LIMIT_MSG 4
 #define READ_CURRENT_MSG 5
@@ -61,10 +61,10 @@ void setupTimerInterrupts() {
     Timer0_SetToPowerup(); // Turn all settings off!
 
      // These settings should give us   8Mhz / 2 / 1 / 191 = 20942Hz ~= 21khz PWM
-     // Or we can have...               8Mhz / 2 / 1 / 250 = 16000Hz  = 16khz PWM
+     // Or we can have...               8Mhz / 2 / 1 / 255 = 15686Hz ~= 16khz PWM
     //OCR0A = MOTOR_PWM_MAX;
     Timer0_SetWaveformGenerationMode(Timer0_Phase_Correct_PWM_FF); // Top is 255, OCR0A is used to modify duty cycle
-    Timer0_ClockSelect(Timer0_Prescale_Value_1);
+    Timer0_ClockSelect(Timer0_Prescale_Value_64); // making it actually 15686Hz / 64 = 245Hz
 
     //Timer0_EnableOutputCompareInterruptA();
     //Timer0_EnableOutputCompareInterruptB();
@@ -199,10 +199,10 @@ void updateControl() {
             receivingSetCurrentLimit = false;
 
             switch (receiveBuffer[3]) {
-                case SET_RAW_MOTOR_MSG:
+                case SET_MOTOR_MSG:
                     receivingSetRawMotor = true;
                     break;
-                case READ_RAW_MOTOR_MSG:
+                case READ_MOTOR_MSG:
                     TinyWireS.send((motorOutput >> 8) & 0xff);
                     TinyWireS.send(motorOutput & 0xff);
                     break;
@@ -231,14 +231,6 @@ void updateControl() {
 }
 
 void updateCurrentControl() {
-    // Only run this every 10ms to give time for motor/current response
-    static uint16_t lastControlRunMs = 0;
-    uint16_t nowMs = millis16();
-    if (nowMs - lastControlRunMs < 10) {
-        return;
-    }
-    lastControlRunMs = nowMs;
-
     if (motorOutput < 0) {
         // ADC0-ADC3 20x Gain differential ADC mode = 001011
         ADMUX = (0b10000000 | 0b001011);
@@ -255,15 +247,26 @@ void updateCurrentControl() {
     if (current < adcGainOffset) {
         current = 0;
     } else {
-        current -= adcGainOffset;
+        //current -= adcGainOffset;
     }
 
-    if (current > currentLimit) {
+    //currentVal = ((currentVal << 1) + current * current * 30) >> 5;
+    if (current > currentVal) {
+        currentVal = current;
+    }
+
+    // Only run this limiting part every 10ms to give time for motor/current response
+    static uint16_t lastControlRunMs = 0;
+    uint16_t nowMs = millis16();
+    if (nowMs - lastControlRunMs < 10) {
+        return;
+    }
+    lastControlRunMs = nowMs;
+
+    if (currentVal > currentLimit) {
         motorOutput = (motorOutput * 30) >> 5;
         // multiplying by 30 >> 5 = 0.9375 each stage gives cutback to 52% in .1 seconds
     }
-
-    currentVal = current;
 }
 
 void setup() {
