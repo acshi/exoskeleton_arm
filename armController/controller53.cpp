@@ -22,7 +22,7 @@ void flushTwi(int address) {
   }
 }
 
-uint16_t sendReadMessage(uint8_t command, int address) {
+uint16_t send53ReadMessage(uint8_t command, int address) {
   flushTwi(address);
 
   Wire.beginTransmission(address);
@@ -35,7 +35,7 @@ uint16_t sendReadMessage(uint8_t command, int address) {
   return (uint16_t)(Wire.read() << 8) | Wire.read();
 }
 
-void singleSendMessage(uint8_t command, int16_t value, int address) {
+static void singleSendMessage(uint8_t command, int16_t value, int address) {
   Wire.beginTransmission(address);
   Wire.write(command);
   Wire.write(command);
@@ -48,9 +48,10 @@ void singleSendMessage(uint8_t command, int16_t value, int address) {
   Wire.endTransmission();
 }
 
-void sendMessageValue(uint8_t command, int16_t value, int address) {
+void send53MessageValue(uint8_t command, int16_t value, int address) {
   // send several times because noise may interfere
   singleSendMessage(command, value, address);
   singleSendMessage(command, value, address);
   singleSendMessage(command, value, address);
 }
+

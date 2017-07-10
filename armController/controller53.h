@@ -12,14 +12,14 @@
 #define VAL_END_BYTE 0xec
 
 
-uint16_t sendReadMessage(uint8_t command, int address);
-void sendMessageValue(uint8_t command, int16_t value, int address);
+uint16_t send53ReadMessage(uint8_t command, int address);
+void send53MessageValue(uint8_t command, int16_t value, int address);
 void flushTwi(int address);
 
-#define setMotor(VAL, ADDR) sendMessageValue(SET_MOTOR_MSG, VAL, ADDR)
-#define readMotor(ADDR) sendReadMessage(READ_MOTOR_MSG, ADDR)
-#define setCurrentLimit(VAL, ADDR) sendMessageValue(SET_CURRENT_LIMIT_MSG, VAL, ADDR)
-#define readCurrentLimit(ADDR) sendReadMessage(READ_CURRENT_LIMIT_MSG, ADDR)
-#define readCurrent(ADDR) sendReadMessage(READ_CURRENT_MSG, ADDR)
-#define readDiagnostic(ADDR) sendReadMessage(DIAGNOSTIC_MSG, ADDR)
-#define readAddress(ADDR) sendReadMessage(ADDRESS_MSG, ADDR)
+#define set53Motor(VAL, ADDR) send53MessageValue(SET_MOTOR_MSG, VAL, ADDR)
+#define rea53dMotor(ADDR) send53ReadMessage(READ_MOTOR_MSG, ADDR)
+#define set53CurrentLimit(VAL, ADDR) send53MessageValue(SET_CURRENT_LIMIT_MSG, VAL, ADDR)
+#define read53CurrentLimit(ADDR) send53ReadMessage(READ_CURRENT_LIMIT_MSG, ADDR)
+#define read53Current(ADDR) send53ReadMessage(READ_CURRENT_MSG, ADDR)
+#define read53Diagnostic(ADDR) send53ReadMessage(DIAGNOSTIC_MSG, ADDR)
+#define read53Address(ADDR) send53ReadMessage(ADDRESS_MSG, ADDR)
