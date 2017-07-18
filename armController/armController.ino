@@ -22,52 +22,63 @@
 #define SHOLDER_SIDE_I 2
 #define SHOLDER_ROTATE_I 3
 
-#define MIN_MOTOR_VAL 30
+#define MIN_MOTOR_VAL 20
 
 byte motorMinMove[N_JOINTS] = {38, 18, 18, 18};
-byte motorSectionP[N_JOINTS] = {0, 0, 0, 0};
+byte motorProportion[N_JOINTS] = {25, 10, 10, 10}; // in 128ths
 
 byte motorAddrs[N_JOINTS] = {0x80, 17, 18, 19};
-byte servoPinsF[N_JOINTS] = {38, 40, 42, 44};
-byte servoPinsB[N_JOINTS] = {39, 41, 43, 45};
+byte ratchetServoPinsF[N_JOINTS] = {38, 40, 42, 44};
+byte ratchetServoPinsB[N_JOINTS] = {39, 41, 43, 45};
+
+byte servoClosedF[N_JOINTS] = {40, 45, 35, 35};
+byte servoOpenF[N_JOINTS] = {80, 65, 50, 50};
+byte servoClosedB[N_JOINTS] = {130, 60, 45, 45};
+byte servoOpenB[N_JOINTS] = {96, 40, 35, 35};
+
+byte servoStatusPins[N_JOINTS * 2] = {22, 24, 26, 28, 23, 25, 27, 29};
+bool servoStatusOpen[N_JOINTS * 2] = {HIGH, LOW, LOW, HIGH, LOW, HIGH, LOW, HIGH};
+
 byte potPins[N_JOINTS] = {4, 5, 6, 7};
-byte servoClosedF[N_JOINTS] = {145, 45, 35, 35};
-byte servoOpenF[N_JOINTS] = {165, 65, 50, 50};
-byte servoClosedB[N_JOINTS] = {85, 60, 45, 45};
-byte servoOpenB[N_JOINTS] = {65, 40, 35, 35};
-
-byte servoStatusPins[N_JOINTS * 2] = {24, 26, 28, 30, 25, 27, 29, 31};
-bool servoStatusInverted[N_JOINTS * 2] = {true, false, true, false, true, false, true, false};
-
-// 213, 241, 
-uint16_t lowerArmPotSections[] = {190, 200, 222, 257, 267, 320, 325, 438, 445, 555, 562, 671, 672, 780, 782, 905};
-uint16_t upperArmPotSections[] = {39, 42, 58, 60, 74, 77, 91, 96, 108, 112, 125, 131, 143, 146, 164, 171, 182, 192, 198, 204, 216, 224, 242, 252, 286, 315, 393, 437};
-
-uint16_t *potSections[N_JOINTS] = {lowerArmPotSections, upperArmPotSections, 0, 0};
-byte numPotSections[N_JOINTS] = {7, 14, 0, 0};
-
-/*#define LOWER_ARM_POT_MIN_L 39
-#define LOWER_ARM_POT_MIN_H 58
-#define LOWER_ARM_POT_MAX_L 382
-#define LOWER_ARM_POT_MAX_H 520*/
+uint16_t potMins[N_JOINTS] = {54, 20, 1, 1}; // 40 40
+uint16_t potMaxs[N_JOINTS] = {195, 520, 999, 999};
 
 #define REMOTE_LOWER_ARM_MAP_MIN 810
 #define REMOTE_LOWER_ARM_MAP_MAX 412
 
+#define POT_DEADBAND_PERCENT 10
+#define POT_DEADBAND_MIN 15
+#define POT_DEADBAND_MAX 25
+
 // how much beyond the pot limits the pot may be and we still attempt a return
 // beyond this, we just disable the motor
-#define POT_OK_MIN_EXT 20
+#define POT_OK_MIN_EXT 10
 #define POT_OK_MAX_EXT 120
 
 #define WIGGLE_MS 250
 
 #define MAX_RETRACT 22
 
-// forwards (F) and backwards (B) ratchet servos
-Servo lowerArmServoF;
-Servo lowerArmServoB;
+#define BOUND_HOLD_N_INCREMENTS 10
+#define BOUND_HOLD_INCREMENT_MS 250
+#define BOUND_HOLD_INCREMENT 2
 
-//SoftwareSerial roboclawSerial(10, 11); // Rx=10, Tx=11
+// forwards (F) and backwards (B) ratchet servos
+Servo lowerArmF;
+Servo lowerArmB;
+Servo upperArmF;
+Servo upperArmB;
+Servo sholderSideF;
+Servo sholderSideB;
+Servo sholderRotateF;
+Servo sholderRotateB;
+Servo ratchetServosF[] = {lowerArmF, upperArmF, sholderSideF, sholderRotateF};
+Servo ratchetServosB[] = {lowerArmB, upperArmB, sholderSideB, sholderRotateB};
+
+#define RATCHET_WAIT_MS 400
+#define RATCHET_POWER_N_INCREMENTS 3
+#define RATCHET_POWER_INCREMENT 1
+
 RoboClaw roboclaw(&Serial1, 10000); // timeout=10ms
 
 Servo lowerArmMotor1;
@@ -103,14 +114,6 @@ const unsigned char PS_64 = (1 << ADPS2) | (1 << ADPS1);
 const unsigned char PS_128 = (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 
 void setup() {
-  /*bluetooth.begin(115200);
-  bluetooth << "$$$"; // command mode
-  bluetooth << "U,9600,N\n"; // temporary change of baud rate for reliability
-  bluetooth.begin(9600);
-  delay(100);
-  bluetooth << "C\n"; // connect to paired device!
-  delay(100);
-  bluetooth << "---\n"; // in case we were already connected, exit*/
   bluetooth.begin(9600);
 
   Wire.begin();
@@ -120,11 +123,12 @@ void setup() {
   Serial.begin(115200);
   roboclaw.begin(115200);
 
-  lowerArmServoF.attach(servoPinsF[LOWER_ARM_I]);
-  lowerArmServoB.attach(servoPinsB[LOWER_ARM_I]);
-  
-  lowerArmServoF.write(servoClosedF[LOWER_ARM_I]);
-  lowerArmServoB.write(servoClosedB[LOWER_ARM_I]);
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    ratchetServosF[i].attach(ratchetServoPinsF[i]);
+    ratchetServosB[i].attach(ratchetServoPinsB[i]);
+    ratchetServosF[i].write(servoClosedF[i]);
+    ratchetServosB[i].write(servoClosedB[i]);
+  }
 
   for (uint8_t i = 0; i < N_JOINTS * 2; i++) {
     motorServos[i].attach(motorServoPins[i]);
@@ -137,29 +141,11 @@ void setup() {
   Serial << "Ready!\n";
 }
 
-uint8_t getSection(byte motorI, uint16_t potVal) {
-  int nSections = numPotSections[motorI];
-  uint16_t *sections = potSections[motorI];
-  
-  for (uint8_t i = 0; i < nSections; i++) {
-    if (potVal >= sections[i * 2] && potVal <= sections[i * 2 + 1]) {
-      return i;
-    } else if (potVal < sections[i * 2]) {
-      if (i > 0 && abs(potVal - sections[i * 2 - 1]) < abs(potVal - sections[i * 2])) {
-        return i - 1;
-      } else {
-        return i;
-      }
-    }
-  }
-
-  return 0;
-}
-
 void setMotorTo(byte motorI, int16_t motorVal) {
   bool useRoboclaw = false;
   bool usePwmControl = true;
   if (useRoboclaw) {
+    motorVal = constrain(motorVal, -128, 128);
     if (motorVal < 0) {
       roboclaw.ForwardM1(motorAddrs[motorI], -motorVal);
       roboclaw.ForwardM2(motorAddrs[motorI], -motorVal);
@@ -168,30 +154,35 @@ void setMotorTo(byte motorI, int16_t motorVal) {
       roboclaw.BackwardM2(motorAddrs[motorI], motorVal);
     }
   } else if (usePwmControl) {
-    uint16_t pulseWidthMicros = 1500 + ((int32_t)motorVal * 500 / 128);
+    motorVal = constrain(motorVal, -128, 128);
+    uint16_t pulseWidthMicrosA = 1500 + ((int32_t)motorVal * 500 / 128);
+    uint16_t pulseWidthMicrosB = 1500 - ((int32_t)motorVal * 500 / 128);
     //Serial << "Writing " << pulseWidthMicros << "us to motors with val " << motorVal << " and analog vals " << analogVals[2] << " and " << analogVals[3] << endl;
-    motorServos[motorI * 2].write(pulseWidthMicros);
-    motorServos[motorI * 2 + 1].write(pulseWidthMicros);
+    motorServos[motorI * 2].write(pulseWidthMicrosA);
+    motorServos[motorI * 2 + 1].write(pulseWidthMicrosB);
   } else {
+    motorVal = constrain(motorVal, -255, 255);
     set53Motor(motorVal, motorI);
   }
 }
 
+// only valid if digitalRead(servoPin) == HIGH.
+bool readRatchetOpenNonblock(uint8_t statusI) {
+  return digitalRead(servoStatusPins[statusI]) == servoStatusOpen[statusI];
+}
+
+// The status pin originating from the servo's pot voltage only holds
+// a reliable signal when the motor is not on. The motor turns on after reading
+// the PWM pulse width, so while the pulse is high, the value is stable.
+bool readRatchetOpen(uint8_t statusI, uint8_t servoPin) {
+  while (digitalRead(servoPin) == LOW) { }
+  return readRatchetOpenNonblock(statusI);
+}
+
 // Open one ratchet so we can move in the direction we want to, based on motorVal
-// And then actually give a little power in the opposite direction to take stress off
-// of the servo we are trying to open. We block until either a small period of time
-// has passed or we notice the shaft has moved a certain amount.
 void manageRatchetFor(byte motorI) {
-  Servo &servoF = lowerArmServoF;
-  Servo &servoB = lowerArmServoB;
-  switch (motorI) {
-    case 0:
-      servoF = lowerArmServoF;
-      servoB = lowerArmServoB;
-      break;
-    default:
-      return;
-  }
+  Servo &servoF = ratchetServosF[motorI];
+  Servo &servoB = ratchetServosB[motorI];
   
   const int16_t motorVal = motorVals[motorI];
   
@@ -201,83 +192,129 @@ void manageRatchetFor(byte motorI) {
     Serial << motorI << ": Closing the ratchets.\n";
     return;
   }
-
-  uint16_t startingPotVal = analogRead(potPins[motorI]);
-  uint8_t startingSection = getSection(motorI, startingPotVal);
-  uint16_t sectionLength = potSections[motorI][startingSection * 2 + 1] - potSections[motorI][startingSection * 2];
-  uint16_t retractVal = min(MAX_RETRACT, sectionLength / 2);
-  uint16_t targetVal;
-  int16_t tempMotorVal;
   
-  if (motorVal > 0 && servoF.read() == servoClosedF[motorI]) {
-    servoB.write(servoClosedB[motorI]);
-    servoF.write(servoOpenF[motorI]);
-    tempMotorVal = -MIN_MOTOR_VAL;
-    targetVal = potSections[motorI][startingSection * 2 + 1] - retractVal;
-    Serial << motorI << ": Opening forward ratchet. In segment " << startingSection << " with target " << targetVal << endl;
-  } else if (motorVal < 0 && servoB.read() == servoClosedB[motorI]) {
-    servoF.write(servoClosedF[motorI]);
-    servoB.write(servoOpenB[motorI]);
-    tempMotorVal = MIN_MOTOR_VAL;
-    targetVal = potSections[motorI][startingSection * 2] + retractVal;
-    Serial << motorI << ": Opening backward ratchet. In segment " << startingSection << " with target " << targetVal << endl;
-  } else {
+  if ((motorVal < 0 && servoF.read() == servoOpenF[motorI]) ||
+      (motorVal > 0 && servoB.read() == servoOpenB[motorI])) {
     return;
   }
-  bool hasSetMotor = false;
+
+  if (motorVal < 0) {
+    servoF.write(servoOpenF[motorI]);
+  } else {
+    servoB.write(servoOpenB[motorI]);
+  }
+  
+  byte forwardStatusI = motorI * 2 + 1;
+  byte backwardStatusI = motorI * 2;
+  bool forwardOpen = false;
+  bool backwardOpen = false;
 
   uint32_t startMillis = millis();
-  while (true || millis() - startMillis <= WIGGLE_MS) {
-    bulkAnalogRead();
-    uint16_t potVal = analogVals[potPins[motorI]];
-    if ((millis() - startMillis) % 200 == 0) {
-      Serial << motorI << ": For " << motorVal << " started opening ratchet at " << startingPotVal << " with motor at " << tempMotorVal << " waiting for it to get to " << targetVal << " right now it is at " << potVal << endl;
+  while (millis() - startMillis <= RATCHET_WAIT_MS) {
+    forwardOpen = readRatchetOpen(forwardStatusI, ratchetServoPinsF[motorI]);//robustDigitalRead(;
+    backwardOpen = readRatchetOpen(backwardStatusI, ratchetServoPinsB[motorI]);//robustDigitalRead(servoStatusPins[backwardStatusI]) == servoStatusOpen[backwardStatusI];
+    //Serial << motorI << "F:" << (forwardOpen ? "open" : "closed") << (servoStatusOpen[forwardStatusI] == LOW ? "(inverted)" : "") << ", ";
+    //Serial << "B:" << (backwardOpen ? "open" : "closed") << (servoStatusOpen[backwardStatusI] == LOW ? "(inverted)" : "") << endl;
+    if ((motorVal < 0 && forwardOpen) ||
+        (motorVal > 0 && backwardOpen)) {
+      Serial << motorI << ": Opened " << ((motorVal > 0) ? "backward" : "forward") << " ratchet without resistance.\n";
+      return;
     }
-    if (motorVal > 0 && potVal <= targetVal) {
-      Serial << motorI << ": Rachet released as we reached a value of " << potVal << " out of our goal of " << targetVal << endl;
-      break;
-    } else if (motorVal < 0 && potVal >= targetVal) {
-      Serial << motorI << ": Rachet released as we reached a value of " << potVal << " out of our goal of " << targetVal << endl;
-      break;
-    }
-    if (!hasSetMotor) {
-      hasSetMotor = true;
-      setMotorTo(motorI, tempMotorVal);
-    }
-    //Serial << "r";
   }
-  setMotorTo(motorI, 0);
 
-  // because we block, flush the receive buffers of any errors that accumulated
-  bluetooth.flush();
+  int16_t ratchetMotorVal = 0;
+  if (motorVal < 0) {
+    ratchetMotorVal = MIN_MOTOR_VAL;
+    Serial << motorI << ": Moving motor backward to open forward ratchet.\n";
+  } else {
+    ratchetMotorVal = -MIN_MOTOR_VAL;
+    Serial << motorI << ": Moving motor forward to open backward ratchet.\n";
+  }
+  setMotorTo(motorI, ratchetMotorVal);
+
+  bool firstLoop = true;
+  byte incrementCount = 0;
+  while(true) {
+    if (!firstLoop && incrementCount < RATCHET_POWER_N_INCREMENTS) {
+      incrementCount++;
+      if (motorVal > 0) {
+        ratchetMotorVal -= RATCHET_POWER_INCREMENT;
+      } else {
+        ratchetMotorVal += RATCHET_POWER_INCREMENT;
+      }
+      setMotorTo(motorI, ratchetMotorVal);
+      Serial << motorI << ": ratchet not yet released... upping motor to: " << ratchetMotorVal << endl;
+    }
+    
+    startMillis = millis();
+    while (millis() - startMillis <= RATCHET_WAIT_MS) {
+      forwardOpen = readRatchetOpen(forwardStatusI, ratchetServoPinsF[motorI]);
+      backwardOpen = readRatchetOpen(backwardStatusI, ratchetServoPinsB[motorI]);
+      if ((motorVal < 0 && forwardOpen) ||
+          (motorVal > 0 && backwardOpen)) {
+        goto exit_loops;
+      }
+    }
+    firstLoop = false;
+  }
+exit_loops:
+  
+  if (motorVal < 0) {
+    Serial << motorI << ": finished opening forward ratchet; closing the backward ratchet.\n";
+    servoB.write(servoClosedB[motorI]);
+  } else {
+    Serial << motorI << ": finished opening backward ratchet; closing the forward ratchet.\n";
+    servoF.write(servoClosedF[motorI]);
+  }
+
+  setMotorTo(motorI, 0);
 }
 
 int16_t boundsManageFor(byte motorI, int16_t motorVal, uint16_t potVal) {
   static int8_t holdOn[N_JOINTS];
-
-  uint16_t potMinL = potSections[motorI][0];
-  uint16_t potMinH = potSections[motorI][1];
-  uint16_t potMaxL = potSections[motorI][2 * numPotSections[motorI] - 2];
-  uint16_t potMaxH = potSections[motorI][2 * numPotSections[motorI] - 1];
-
-  uint16_t potMin = (potMinL + potMinH) >> 1;
-  uint16_t potMax = (potMaxL + potMaxH) >> 1;
+  static uint32_t holdStartMs[N_JOINTS];
   
-  if (potVal < potMinL - POT_OK_MIN_EXT || potVal > potMaxH + POT_OK_MAX_EXT) {
+  uint16_t potMin = potMins[motorI];
+  uint16_t potMax = potMaxs[motorI];
+  
+  if (potVal < potMin - POT_OK_MIN_EXT || potVal > potMax + POT_OK_MAX_EXT) {
     return 0; // disable for safety
   }
+
+  uint16_t potMinH = potMin + POT_DEADBAND_MIN;//POT_DEADBAND_PERCENT * potMin / 100;
+  uint16_t potMaxL = potMax - POT_DEADBAND_MAX;//POT_DEADBAND_PERCENT * potMax / 100;
+  uint16_t additionalPower = 0;
+
+  if (holdOn[motorI]) {
+    uint16_t incrementsPassed = (millis() - holdStartMs[motorI]) / BOUND_HOLD_INCREMENT_MS;
+    additionalPower = min(BOUND_HOLD_N_INCREMENTS, incrementsPassed) * BOUND_HOLD_INCREMENT;
+  }
   
-  if (potVal < potMinL || (holdOn[motorI] > 0 && potVal < potMin)) {
+  if (potVal < potMin || (holdOn[motorI] > 0 && potVal < potMinH)) {
     // attempt a slow return to within the correct bounds
-    motorVal = MIN_MOTOR_VAL;
-    holdOn[motorI] = 1;
-  } else if (potVal > potMaxH || (holdOn[motorI] < 0 && potVal > potMax)) {
-    motorVal = -MIN_MOTOR_VAL;
-    holdOn[motorI] = -1;
+    if (!holdOn[motorI]) {
+      holdOn[motorI] = 1;
+      holdStartMs[motorI] = millis();
+      Serial << motorI << ": Placing a bounds hold until we get back up to " << potMinH << " from " << potVal << endl;
+    }
+    motorVal = MIN_MOTOR_VAL + additionalPower;
+  } else if (potVal > potMax || (holdOn[motorI] < 0 && potVal > potMaxL)) {
+    if (!holdOn[motorI]) {
+      holdOn[motorI] = -1;
+      holdStartMs[motorI] = millis();
+      Serial << motorI << ": Placing a bounds hold until we get back down to " << potMaxL << " from " << potVal << endl;
+    }
+    motorVal = -MIN_MOTOR_VAL - additionalPower;
   } else if ((motorVal < 0 && potVal < potMinH) || (motorVal > 0 && potVal > potMaxL)) {
     motorVal = 0;
+    if (holdOn[motorI]) {
+      Serial << motorI << ": removed hold\n";
+    }
     holdOn[motorI] = 0;
   } else {
+    if (holdOn[motorI]) {
+      Serial << motorI << ": removed hold\n";
+    }
     holdOn[motorI] = 0;
   }
   return motorVal;
@@ -353,12 +390,7 @@ void forceBasedControl() {
 void remoteBasedControl(bool shouldReport) {
   static bool inMotion = false;
   static int8_t motionDirection;
-  static uint8_t motionTargetSection;
-  static uint16_t motionTargetVal;
   static uint32_t lastMotorUpdateMicros;
-  
-  int nSections = numPotSections[LOWER_ARM_I];
-  uint16_t *sections = potSections[LOWER_ARM_I];
 
   uint16_t constrainedRemoteVal;
   if (REMOTE_LOWER_ARM_MAP_MIN < REMOTE_LOWER_ARM_MAP_MAX) {
@@ -368,27 +400,16 @@ void remoteBasedControl(bool shouldReport) {
   }
   
   uint16_t desiredPotVal = map(constrainedRemoteVal, REMOTE_LOWER_ARM_MAP_MIN, REMOTE_LOWER_ARM_MAP_MAX,
-                               sections[0], sections[nSections * 2 - 1]);
+                               potMins[LOWER_ARM_I] + POT_DEADBAND_MIN, potMaxs[LOWER_ARM_I] - POT_DEADBAND_MAX);
 
   uint16_t currentPotVal = analogVals[potPins[LOWER_ARM_I]];
-  uint8_t targetSection = getSection(LOWER_ARM_I, desiredPotVal);
 
-  uint16_t sectionLow = sections[targetSection * 2];
-  uint16_t sectionHigh = sections[targetSection * 2 + 1];
-  bool inSection = currentPotVal >= sectionLow && currentPotVal <= sectionHigh;
+  bool closeEnough = abs((int16_t)currentPotVal - (int16_t)desiredPotVal) <= (POT_DEADBAND_PERCENT * desiredPotVal) / 100;
 
-  if (!inMotion && inSection) {
+  if (!inMotion && closeEnough) {
     return;
   }
   
-  bool madeTargetF = motionDirection > 0 && currentPotVal >= motionTargetVal;
-  bool madeTargetB = motionDirection < 0 && currentPotVal <= motionTargetVal;
-  if (inMotion && inSection && (targetSection == motionTargetSection) && (madeTargetF || madeTargetB)) {
-    inMotion = false;
-    Serial << "Target section reached.\n";
-    return;
-  }
-
   if (!inMotion) {
     if (desiredPotVal > currentPotVal) {
       motionDirection = 1;
@@ -396,39 +417,52 @@ void remoteBasedControl(bool shouldReport) {
       motionDirection = -1;
     }
     inMotion = true;
-    Serial << "Starting action from " << currentPotVal << " to " << desiredPotVal << " in section " << targetSection << "\n";
+    Serial << "Starting action from " << currentPotVal << " to " << desiredPotVal << "\n";
   }
 
-  uint16_t sectionLength = sectionHigh - sectionLow;
-  if (motionDirection > 0) {
-    motionTargetVal = sections[targetSection * 2] + sectionLength / 4;
-  } else {
-    motionTargetVal = sections[targetSection * 2 + 1] - sectionLength / 4;
-  }
-  motionTargetSection = targetSection;
-
-  uint8_t currentSection = getSection(LOWER_ARM_I, currentPotVal);
-
-  int16_t newMotorVal = ((int16_t)targetSection - (int16_t)currentSection) * motorSectionP[LOWER_ARM_I];
-  if (motionDirection < 0) {
-    newMotorVal -= motorMinMove[LOWER_ARM_I];
-    newMotorVal = max(-128, newMotorVal);
-  } else {
-    newMotorVal += motorMinMove[LOWER_ARM_I];
-    newMotorVal = min(128, newMotorVal);
+  int16_t newMotorVal = 0;
+  if (!closeEnough) {
+    newMotorVal = ((int16_t)desiredPotVal - (int16_t)currentPotVal) * motorProportion[LOWER_ARM_I] / 128;
+    if (newMotorVal < 0) {
+      newMotorVal -= motorMinMove[LOWER_ARM_I];
+      newMotorVal = max(-128, newMotorVal);
+    } else {
+      newMotorVal += motorMinMove[LOWER_ARM_I];
+      newMotorVal = min(128, newMotorVal);
+    }
   }
   
   uint32_t nowMicros = micros();
-  if (nowMicros - lastMotorUpdateMicros > 5000) {
-    motorVals[LOWER_ARM_I] = (lastMotorVals[LOWER_ARM_I] * 22 + (newMotorVal * 10)) / 32;
+  if (nowMicros - lastMotorUpdateMicros > 30e3) {
+    // help motor move
+    if (lastMotorVals[LOWER_ARM_I] == 0) {
+      if (newMotorVal > 0) {
+        lastMotorVals[LOWER_ARM_I] = motorMinMove[LOWER_ARM_I] / 2;
+      } else {
+        lastMotorVals[LOWER_ARM_I] = -motorMinMove[LOWER_ARM_I] / 2;
+      }
+    }
+    
+    int8_t convergenceAdjustment = 0;
+    if (newMotorVal > 0 && newMotorVal > lastMotorVals[LOWER_ARM_I]) {
+      convergenceAdjustment = 31;
+    } else if (newMotorVal < 0 && newMotorVal < lastMotorVals[LOWER_ARM_I]) {
+      convergenceAdjustment = -31;
+    }
+    motorVals[LOWER_ARM_I] = (lastMotorVals[LOWER_ARM_I] * 31 + newMotorVal + convergenceAdjustment) / 32;
     lastMotorUpdateMicros = nowMicros;
   } else {
     motorVals[LOWER_ARM_I] = lastMotorVals[LOWER_ARM_I];
   }
 
+  if (closeEnough && motorVals[LOWER_ARM_I] == 0) {
+    inMotion = false;
+    Serial << "Target location reached.\n";
+    return;
+  }
+
   if (shouldReport) {
-    Serial << "Current section: " << currentSection << " Target section: " << targetSection;
-    Serial << " Target pot val: " << motionTargetVal << " New Motor Val: " << newMotorVal << " ";
+    Serial << "Target pot val: " << desiredPotVal << " New Motor Val: " << newMotorVal << " Last motor val: " << lastMotorVals[LOWER_ARM_I] << " ";
   }
 }
 
@@ -451,7 +485,9 @@ void handleBluetooth() {
   while (bluetooth.available()) {
     byte start = bluetooth.read();
     if (start != FRAME_START_BYTE) {
-      Serial << "ignore bluetooth val: " << (char)start << " or " << (byte)start << endl;
+      if (start != 0) {
+        Serial << "ignore bluetooth val: " << (char)start << " or " << (byte)start << endl;
+      }
       continue;
     }
     
@@ -484,7 +520,7 @@ void loop() {
   static uint32_t lastReportStartMicros = 0;
   uint32_t startMicros = micros();
 
-  bool shouldReport = startMicros - lastReportStartMicros > 100L * 1000L;
+  bool shouldReport = startMicros - lastReportStartMicros > 100e3L;
 
   handleBluetooth();
   
@@ -494,11 +530,6 @@ void loop() {
   int lowerRight = analogVals[1];*/
   int lowerTop = analogVals[2];
   int lowerBottom = analogVals[3];
-
-  /*int lowerArmPot = analogVals[potPins[LOWER_ARM_I]];
-  int upperArmPot = analogVals[5];
-  int sholderSidePot = analogVals[6];
-  int sholderRotatePot = analogVals[7];*/
 
   for (uint8_t i = 0; i < N_JOINTS; i++) {
     motorVals[i] = 0;
@@ -510,8 +541,15 @@ void loop() {
     forceBasedControl();
   }
 
+  if (shouldReport) {
+    Serial << "From control: " << motorVals[0] << " ";
+  }
+
   for (uint8_t i = 0; i < N_JOINTS; i++) {
     motorVals[i] = boundsManageFor(i, motorVals[i], analogVals[potPins[i]]);
+    if (shouldReport && i == 0) {
+      Serial << "Bounds managed: " << motorVals[i] << " ";
+    }
     
     if (motorVals[i] != lastMotorVals[i]) {
       lastMotorVals[i] = motorVals[i];
@@ -521,9 +559,19 @@ void loop() {
     }
   }
 
+  static bool fRatchetOpen[N_JOINTS];
+  static bool bRatchetOpen[N_JOINTS];
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    if (digitalRead(ratchetServoPinsF[i]) == HIGH) {
+      fRatchetOpen[i] = readRatchetOpenNonblock(i * 2 + 1);
+    }
+    if (digitalRead(ratchetServoPinsB[i]) == HIGH) {
+      bRatchetOpen[i] = readRatchetOpenNonblock(i * 2);
+    }
+  }
+
   if (shouldReport) {
     Serial << "Remote val: " << remoteLowerArmVal << " ";
-    Serial << "From control: " << motorVals[LOWER_ARM_I] << " ";
     Serial << "Top Force: " << lowerTop << " Bottom Force: " << lowerBottom;// << " Pot: " << lowerArmPot;
     Serial << " Pots: ";
     for (uint8_t i = 0; i < N_JOINTS; i++) {
@@ -533,6 +581,11 @@ void loop() {
     Serial << " Motors: ";
     for (uint8_t i = 0; i < N_JOINTS; i++) {
       Serial << motorVals[i] << " ";
+    }
+    Serial << " Ratchets: ";
+    for (uint8_t i = 0; i < 1; i++) {
+      Serial << i << "F:" << (fRatchetOpen[i] ? "open" : "closed") << (servoStatusOpen[i * 2 + 1] == LOW ? "(inverted)" : "") << ", ";
+      Serial << "B:" << (bRatchetOpen[i] ? "open" : "closed") << (servoStatusOpen[i * 2] == LOW ? "(inverted)" : "") << ", ";
     }
     Serial << " ... at " << loopIter * 1000000 / (startMicros - lastReportStartMicros) << "hz\n";
     lastReportStartMicros = startMicros;

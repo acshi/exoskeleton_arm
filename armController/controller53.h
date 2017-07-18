@@ -17,7 +17,7 @@ void send53MessageValue(uint8_t command, int16_t value, int address);
 void flushTwi(int address);
 
 #define set53Motor(VAL, ADDR) send53MessageValue(SET_MOTOR_MSG, VAL, ADDR)
-#define rea53dMotor(ADDR) send53ReadMessage(READ_MOTOR_MSG, ADDR)
+#define read53Motor(ADDR) send53ReadMessage(READ_MOTOR_MSG, ADDR)
 #define set53CurrentLimit(VAL, ADDR) send53MessageValue(SET_CURRENT_LIMIT_MSG, VAL, ADDR)
 #define read53CurrentLimit(ADDR) send53ReadMessage(READ_CURRENT_LIMIT_MSG, ADDR)
 #define read53Current(ADDR) send53ReadMessage(READ_CURRENT_MSG, ADDR)
