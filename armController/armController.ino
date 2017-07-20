@@ -23,8 +23,9 @@
 #define SHOLDER_ROTATE_I 3
 
 byte motorMinMove[N_JOINTS] = {22, 18, 18, 18};
-byte motorProportion[N_JOINTS] = {27, 1, 1, 1}; // in 128ths
-byte motorDerivative[N_JOINTS] = {12, 1, 1, 1}; // in 128ths
+byte motorProportion[N_JOINTS] = {22, 1, 1, 1}; // in 128ths
+int16_t motorDerivative[N_JOINTS] = {220, 1, 1, 1}; // in 128ths
+int16_t lastErrors[N_JOINTS];
 
 byte motorAddrs[N_JOINTS] = {0x80, 17, 18, 19};
 byte ratchetServoPinsF[N_JOINTS] = {38, 40, 42, 44};
@@ -39,14 +40,14 @@ byte servoStatusPins[N_JOINTS * 2] = {22, 24, 26, 28, 23, 25, 27, 29};
 bool servoStatusOpen[N_JOINTS * 2] = {HIGH, LOW, LOW, HIGH, LOW, HIGH, LOW, HIGH};
 
 byte potPins[N_JOINTS] = {4, 5, 6, 7};
-uint16_t potMins[N_JOINTS] = {950, 2, 2, 2}; // 40 40
+uint16_t potMins[N_JOINTS] = {930, 2, 2, 2}; // 40 40
 uint16_t potMaxs[N_JOINTS] = {2050, 5000, 5000, 5000};
 
 #define REMOTE_LOWER_ARM_MAP_MIN 810
 #define REMOTE_LOWER_ARM_MAP_MAX 500
 
 #define POT_DEADBAND_PERCENT 10
-#define POT_DEADBAND_MIN 40
+#define POT_DEADBAND_MIN 50
 #define POT_DEADBAND_MAX 40
 
 // how much beyond the pot limits the pot may be and we still attempt a return
@@ -155,8 +156,8 @@ void setMotorTo(byte motorI, int16_t motorVal) {
     }
   } else if (usePwmControl) {
     motorVal = constrain(motorVal, -128, 128);
-    uint16_t pulseWidthMicrosA = 1500 + ((int32_t)motorVal * 500 / 128);
-    uint16_t pulseWidthMicrosB = 1500 - ((int32_t)motorVal * 500 / 128);
+    uint16_t pulseWidthMicrosA = 1500 + ((int32_t)motorVal * 500 >> 7);
+    uint16_t pulseWidthMicrosB = 1500 - ((int32_t)motorVal * 500 >> 7);
     //Serial << "Writing " << pulseWidthMicros << "us to motors with val " << motorVal << " and analog vals " << analogVals[2] << " and " << analogVals[3] << endl;
     motorServos[motorI * 2].write(pulseWidthMicrosA);
     motorServos[motorI * 2 + 1].write(pulseWidthMicrosB);
@@ -463,10 +464,11 @@ void remoteBasedControl(bool shouldReport) {
   }
   
   uint32_t nowMicros = micros();
-  if (nowMicros - lastMotorUpdateMicros > 15e3) {
+  if (nowMicros - lastMotorUpdateMicros > 5e3) {
     int16_t newMotorVal = 0;
+    int16_t error = (int16_t)desiredPotVal - (int16_t)currentPotVal;//(int16_t)rawAnalogVals[potPins[LOWER_ARM_I]];
     if (!closeEnough) {
-      newMotorVal = ((int16_t)desiredPotVal - (int16_t)currentPotVal) * motorProportion[LOWER_ARM_I] / 128;
+      newMotorVal = error * motorProportion[LOWER_ARM_I] >> 7;
       if (newMotorVal < 0) {
         newMotorVal -= motorMinMove[LOWER_ARM_I];
         newMotorVal = max(-128, newMotorVal);
@@ -474,29 +476,37 @@ void remoteBasedControl(bool shouldReport) {
         newMotorVal += motorMinMove[LOWER_ARM_I];
         newMotorVal = min(128, newMotorVal);
       }
-  
-      uint16_t rawPotVal = rawAnalogVals[potPins[LOWER_ARM_I]];
-      int16_t derivative = ((int16_t)rawPotVal - (int16_t)lastRawPotVal) * motorDerivative[LOWER_ARM_I] / 128;
-      
+
+      int16_t derivative = (int32_t)(error - lastErrors[LOWER_ARM_I]) * (int32_t)motorDerivative[LOWER_ARM_I] >> 7;
+      if ((newMotorVal > 0 && derivative < -newMotorVal) ||
+          (newMotorVal < 0 && derivative > -newMotorVal)) {
+        Serial << "limited " << derivative << " to " << -newMotorVal << endl;
+        derivative = -newMotorVal;
+      }
+      newMotorVal += derivative;
+      Serial << "goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[LOWER_ARM_I]) << " dTerm: " << derivative  << " total: " << newMotorVal << endl;
+    } else {
+      Serial << "close w/ goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[LOWER_ARM_I])  << " total: " << newMotorVal << endl;
     }
+    lastErrors[LOWER_ARM_I] = error;
 
     int16_t lastMotorVal = lastMotorVals[LOWER_ARM_I];
     // break through dynamic friction
     if (lastMotorVal == 0) {
       if (newMotorVal > 0) {
-        lastMotorVal = motorMinMove[LOWER_ARM_I] / 2;
+        lastMotorVal = motorMinMove[LOWER_ARM_I] >> 1;
       } else {
-        lastMotorVal = -motorMinMove[LOWER_ARM_I] / 2;
+        lastMotorVal = -motorMinMove[LOWER_ARM_I] >> 1;
       }
     }
     
     int8_t convergenceAdjustment = 0;
-    if (newMotorVal > 0 && newMotorVal > lastMotorVal) {
+    if (newMotorVal > lastMotorVal) {
       convergenceAdjustment = 31;
-    } else if (newMotorVal < 0 && newMotorVal < lastMotorVal) {
+    } else if (newMotorVal < lastMotorVal) {
       convergenceAdjustment = -31;
     }
-    motorVals[LOWER_ARM_I] = (lastMotorVal * 31 + newMotorVal + convergenceAdjustment) / 32;
+    motorVals[LOWER_ARM_I] = (lastMotorVal * 30 + (newMotorVal << 1) + convergenceAdjustment) >> 5;
     lastMotorUpdateMicros = nowMicros;
   } else {
     motorVals[LOWER_ARM_I] = lastMotorVals[LOWER_ARM_I];
