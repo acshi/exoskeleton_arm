@@ -13,19 +13,18 @@
 #define N_JOINTS 4
 
 // motor power calculated as max(0, force f - FORCE_THRESHOLD) * FORCE_MULT >> FORCE_SHIFT
-#define FORCE_THRESHOLD 60
+#define FORCE_THRESHOLD 120
 #define FORCE_MULT 3
-#define FORCE_SHIFT 5
+#define FORCE_SHIFT 6
 
 #define LOWER_ARM_I 0
 #define UPPER_ARM_I 1
 #define SHOLDER_SIDE_I 2
 #define SHOLDER_ROTATE_I 3
 
-#define MIN_MOTOR_VAL 20
-
-byte motorMinMove[N_JOINTS] = {38, 18, 18, 18};
-byte motorProportion[N_JOINTS] = {25, 10, 10, 10}; // in 128ths
+byte motorMinMove[N_JOINTS] = {22, 18, 18, 18};
+byte motorProportion[N_JOINTS] = {27, 1, 1, 1}; // in 128ths
+byte motorDerivative[N_JOINTS] = {12, 1, 1, 1}; // in 128ths
 
 byte motorAddrs[N_JOINTS] = {0x80, 17, 18, 19};
 byte ratchetServoPinsF[N_JOINTS] = {38, 40, 42, 44};
@@ -40,27 +39,27 @@ byte servoStatusPins[N_JOINTS * 2] = {22, 24, 26, 28, 23, 25, 27, 29};
 bool servoStatusOpen[N_JOINTS * 2] = {HIGH, LOW, LOW, HIGH, LOW, HIGH, LOW, HIGH};
 
 byte potPins[N_JOINTS] = {4, 5, 6, 7};
-uint16_t potMins[N_JOINTS] = {54, 20, 1, 1}; // 40 40
-uint16_t potMaxs[N_JOINTS] = {195, 520, 999, 999};
+uint16_t potMins[N_JOINTS] = {950, 2, 2, 2}; // 40 40
+uint16_t potMaxs[N_JOINTS] = {2050, 5000, 5000, 5000};
 
 #define REMOTE_LOWER_ARM_MAP_MIN 810
-#define REMOTE_LOWER_ARM_MAP_MAX 412
+#define REMOTE_LOWER_ARM_MAP_MAX 500
 
 #define POT_DEADBAND_PERCENT 10
-#define POT_DEADBAND_MIN 15
-#define POT_DEADBAND_MAX 25
+#define POT_DEADBAND_MIN 40
+#define POT_DEADBAND_MAX 40
 
 // how much beyond the pot limits the pot may be and we still attempt a return
 // beyond this, we just disable the motor
-#define POT_OK_MIN_EXT 10
-#define POT_OK_MAX_EXT 120
+#define POT_OK_MIN_EXT 110
+#define POT_OK_MAX_EXT 80
 
 #define WIGGLE_MS 250
 
 #define MAX_RETRACT 22
 
 #define BOUND_HOLD_N_INCREMENTS 10
-#define BOUND_HOLD_INCREMENT_MS 250
+#define BOUND_HOLD_INCREMENT_MS 1000
 #define BOUND_HOLD_INCREMENT 2
 
 // forwards (F) and backwards (B) ratchet servos
@@ -102,16 +101,17 @@ uint16_t remoteLowerArmVal = 0;
 
 #define N_ANALOG_VALS 13
 uint16_t analogVals[N_ANALOG_VALS];
+uint16_t rawAnalogVals[N_ANALOG_VALS];
 
 int16_t lastMotorVals[4];
 int16_t motorVals[4];
 
 // ADC prescalers
 // from http://www.microsmart.co.za/technical/2014/03/01/advanced-arduino-adc/
-const unsigned char PS_16 = (1 << ADPS2);
-const unsigned char PS_32 = (1 << ADPS2) | (1 << ADPS0);
-const unsigned char PS_64 = (1 << ADPS2) | (1 << ADPS1);
-const unsigned char PS_128 = (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+#define PS_16 (char)(1 << ADPS2)
+#define PS_32 (char)((1 << ADPS2) | (1 << ADPS0))
+#define PS_64 (char)((1 << ADPS2) | (1 << ADPS1))
+#define PS_128 (char)((1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0))
 
 void setup() {
   bluetooth.begin(9600);
@@ -224,13 +224,19 @@ void manageRatchetFor(byte motorI) {
 
   int16_t ratchetMotorVal = 0;
   if (motorVal < 0) {
-    ratchetMotorVal = MIN_MOTOR_VAL;
+    ratchetMotorVal = motorMinMove[motorI];
     Serial << motorI << ": Moving motor backward to open forward ratchet.\n";
   } else {
-    ratchetMotorVal = -MIN_MOTOR_VAL;
+    ratchetMotorVal = -motorMinMove[motorI];
     Serial << motorI << ": Moving motor forward to open backward ratchet.\n";
   }
   setMotorTo(motorI, ratchetMotorVal);
+  // disable all other motors since we are blocking here...
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    if (i != motorI) {
+      setMotorTo(i, 0);
+    }
+  }
 
   bool firstLoop = true;
   byte incrementCount = 0;
@@ -297,14 +303,14 @@ int16_t boundsManageFor(byte motorI, int16_t motorVal, uint16_t potVal) {
       holdStartMs[motorI] = millis();
       Serial << motorI << ": Placing a bounds hold until we get back up to " << potMinH << " from " << potVal << endl;
     }
-    motorVal = MIN_MOTOR_VAL + additionalPower;
+    motorVal = motorMinMove[motorI] + additionalPower;
   } else if (potVal > potMax || (holdOn[motorI] < 0 && potVal > potMaxL)) {
     if (!holdOn[motorI]) {
       holdOn[motorI] = -1;
       holdStartMs[motorI] = millis();
       Serial << motorI << ": Placing a bounds hold until we get back down to " << potMaxL << " from " << potVal << endl;
     }
-    motorVal = -MIN_MOTOR_VAL - additionalPower;
+    motorVal = -motorMinMove[motorI] - additionalPower;
   } else if ((motorVal < 0 && potVal < potMinH) || (motorVal > 0 && potVal > potMaxL)) {
     motorVal = 0;
     if (holdOn[motorI]) {
@@ -320,40 +326,52 @@ int16_t boundsManageFor(byte motorI, int16_t motorVal, uint16_t potVal) {
   return motorVal;
 }
 
+uint16_t readVirtual11BitAdc(uint8_t pin) {
+    analogRead(pin);
+    uint16_t sum = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+        sum += analogRead(pin);
+    }
+    return sum >> 1;
+}
+
 void bulkAnalogRead() {
   static bool initialized = false;
   static uint32_t lastReadMicros;
   uint32_t nowMicros = micros();
 
-  uint16_t tareValue = analogRead(N_ANALOG_VALS - 1);
+  uint16_t tareValue = readVirtual11BitAdc(N_ANALOG_VALS - 1);
   analogVals[N_ANALOG_VALS - 1] = tareValue;
 
   if (!initialized) {
     initialized = true;
     for (uint8_t j = 0; j < N_ANALOG_VALS - 1; j++) {
-      uint16_t newVal = analogRead(j);
+      uint16_t newVal = readVirtual11BitAdc(j);
       if (newVal >= tareValue) {
         newVal -= tareValue;
       } else {
         newVal = 0;
       }
       analogVals[j] = newVal;
+      rawAnalogVals[j] = newVal;
     }
   } else {
     for (uint8_t j = 0; j < N_ANALOG_VALS - 1; j++) {
-      uint16_t newVal = analogRead(j);
+      uint16_t newVal = readVirtual11BitAdc(j);
       if (newVal >= tareValue) {
         newVal -= tareValue;
       } else {
         newVal = 0;
       }
+      rawAnalogVals[j] = newVal;
+      
       int32_t microsPassed = (int32_t)nowMicros - lastReadMicros;
       if (microsPassed >= 769) {
-        analogVals[j] = (analogVals[j] * 26 + (newVal * 6)) >> 5;
+        analogVals[j] = ((uint32_t)analogVals[j] * 26 + (newVal * 6)) >> 5;
       } else if (microsPassed >= 500) {
-        analogVals[j] = (analogVals[j] * 28 + (newVal * 4)) >> 5;
+        analogVals[j] = ((uint32_t)analogVals[j] * 28 + (newVal * 4)) >> 5;
       } else {
-        analogVals[j] = (analogVals[j] * 30 + (newVal * 2)) >> 5;
+        analogVals[j] = ((uint32_t)analogVals[j] * 30 + (newVal * 2)) >> 5;
       }
     }
   }
@@ -377,20 +395,43 @@ void forceBasedControl() {
   int sholderSideMotorVal = 0;
   int sholderRotateMotorVal = 0;*/
 
+  int16_t motorVal;
   int lowerTopBottomDiff = lowerTop - lowerBottom;
   if (lowerTopBottomDiff > FORCE_THRESHOLD) {
-    motorVals[LOWER_ARM_I] = (lowerTopBottomDiff - FORCE_THRESHOLD) * FORCE_MULT >> FORCE_SHIFT;
+    motorVal = (lowerTopBottomDiff - FORCE_THRESHOLD) * FORCE_MULT >> FORCE_SHIFT;
   } else if (lowerTopBottomDiff < -FORCE_THRESHOLD) {
-    motorVals[LOWER_ARM_I] = (lowerTopBottomDiff + FORCE_THRESHOLD) * FORCE_MULT >> FORCE_SHIFT;
+    motorVal = (lowerTopBottomDiff + FORCE_THRESHOLD) * FORCE_MULT >> FORCE_SHIFT;
   } else {
     motorVals[LOWER_ARM_I] = 0;
+    return;
   }
+
+  uint16_t potRange = potMaxs[LOWER_ARM_I] - potMins[LOWER_ARM_I];
+  uint16_t potVal = analogVals[potPins[LOWER_ARM_I]];
+  
+  uint16_t distFromEnd;
+  if (lowerTopBottomDiff < 0) {
+    distFromEnd = potVal - potMins[LOWER_ARM_I];
+  } else {
+    distFromEnd = potMaxs[LOWER_ARM_I] - potVal;
+  }
+  
+  if (distFromEnd < potRange / 3) {
+    motorVal = (int32_t)motorVal * 2 * (int32_t)distFromEnd / potRange;
+  }
+  if (lowerTopBottomDiff < 0) {
+    motorVal = min(-motorMinMove[LOWER_ARM_I], motorVal);
+  } else {
+    motorVal = max(motorMinMove[LOWER_ARM_I], motorVal);
+  }
+  motorVals[LOWER_ARM_I] = motorVal;
 }
 
 void remoteBasedControl(bool shouldReport) {
   static bool inMotion = false;
   static int8_t motionDirection;
   static uint32_t lastMotorUpdateMicros;
+  static uint16_t lastRawPotVal;
 
   uint16_t constrainedRemoteVal;
   if (REMOTE_LOWER_ARM_MAP_MIN < REMOTE_LOWER_ARM_MAP_MAX) {
@@ -417,39 +458,45 @@ void remoteBasedControl(bool shouldReport) {
       motionDirection = -1;
     }
     inMotion = true;
+    lastRawPotVal = rawAnalogVals[potPins[LOWER_ARM_I]];
     Serial << "Starting action from " << currentPotVal << " to " << desiredPotVal << "\n";
-  }
-
-  int16_t newMotorVal = 0;
-  if (!closeEnough) {
-    newMotorVal = ((int16_t)desiredPotVal - (int16_t)currentPotVal) * motorProportion[LOWER_ARM_I] / 128;
-    if (newMotorVal < 0) {
-      newMotorVal -= motorMinMove[LOWER_ARM_I];
-      newMotorVal = max(-128, newMotorVal);
-    } else {
-      newMotorVal += motorMinMove[LOWER_ARM_I];
-      newMotorVal = min(128, newMotorVal);
-    }
   }
   
   uint32_t nowMicros = micros();
-  if (nowMicros - lastMotorUpdateMicros > 30e3) {
-    // help motor move
-    if (lastMotorVals[LOWER_ARM_I] == 0) {
-      if (newMotorVal > 0) {
-        lastMotorVals[LOWER_ARM_I] = motorMinMove[LOWER_ARM_I] / 2;
+  if (nowMicros - lastMotorUpdateMicros > 15e3) {
+    int16_t newMotorVal = 0;
+    if (!closeEnough) {
+      newMotorVal = ((int16_t)desiredPotVal - (int16_t)currentPotVal) * motorProportion[LOWER_ARM_I] / 128;
+      if (newMotorVal < 0) {
+        newMotorVal -= motorMinMove[LOWER_ARM_I];
+        newMotorVal = max(-128, newMotorVal);
       } else {
-        lastMotorVals[LOWER_ARM_I] = -motorMinMove[LOWER_ARM_I] / 2;
+        newMotorVal += motorMinMove[LOWER_ARM_I];
+        newMotorVal = min(128, newMotorVal);
+      }
+  
+      uint16_t rawPotVal = rawAnalogVals[potPins[LOWER_ARM_I]];
+      int16_t derivative = ((int16_t)rawPotVal - (int16_t)lastRawPotVal) * motorDerivative[LOWER_ARM_I] / 128;
+      
+    }
+
+    int16_t lastMotorVal = lastMotorVals[LOWER_ARM_I];
+    // break through dynamic friction
+    if (lastMotorVal == 0) {
+      if (newMotorVal > 0) {
+        lastMotorVal = motorMinMove[LOWER_ARM_I] / 2;
+      } else {
+        lastMotorVal = -motorMinMove[LOWER_ARM_I] / 2;
       }
     }
     
     int8_t convergenceAdjustment = 0;
-    if (newMotorVal > 0 && newMotorVal > lastMotorVals[LOWER_ARM_I]) {
+    if (newMotorVal > 0 && newMotorVal > lastMotorVal) {
       convergenceAdjustment = 31;
-    } else if (newMotorVal < 0 && newMotorVal < lastMotorVals[LOWER_ARM_I]) {
+    } else if (newMotorVal < 0 && newMotorVal < lastMotorVal) {
       convergenceAdjustment = -31;
     }
-    motorVals[LOWER_ARM_I] = (lastMotorVals[LOWER_ARM_I] * 31 + newMotorVal + convergenceAdjustment) / 32;
+    motorVals[LOWER_ARM_I] = (lastMotorVal * 31 + newMotorVal + convergenceAdjustment) / 32;
     lastMotorUpdateMicros = nowMicros;
   } else {
     motorVals[LOWER_ARM_I] = lastMotorVals[LOWER_ARM_I];
@@ -462,7 +509,7 @@ void remoteBasedControl(bool shouldReport) {
   }
 
   if (shouldReport) {
-    Serial << "Target pot val: " << desiredPotVal << " New Motor Val: " << newMotorVal << " Last motor val: " << lastMotorVals[LOWER_ARM_I] << " ";
+    Serial << "Target pot val: " << desiredPotVal << " Last motor val: " << lastMotorVals[LOWER_ARM_I] << " ";
   }
 }
 
