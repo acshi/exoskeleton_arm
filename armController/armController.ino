@@ -3,6 +3,7 @@
 #include <RoboClaw.h>
 #include <Servo.h>
 #include <Streaming.h>
+#include <Metro.h>
 #include <Wire.h>
 #include "controller53.h"
 
@@ -21,6 +22,8 @@
 #define UPPER_ARM_I 1
 #define SHOLDER_SIDE_I 2
 #define SHOLDER_ROTATE_I 3
+
+#define ARM_ALL_ENABLE_PIN 7
 
 byte motorMinMove[N_JOINTS] = {22, 18, 18, 18};
 byte motorProportion[N_JOINTS] = {22, 1, 1, 1}; // in 128ths
@@ -43,8 +46,10 @@ byte potPins[N_JOINTS] = {4, 5, 6, 7};
 uint16_t potMins[N_JOINTS] = {930, 2, 2, 2}; // 40 40
 uint16_t potMaxs[N_JOINTS] = {2050, 5000, 5000, 5000};
 
-#define REMOTE_LOWER_ARM_MAP_MIN 810
-#define REMOTE_LOWER_ARM_MAP_MAX 500
+// that range of the values sent from the remote arm
+uint16_t remoteMapMins[N_JOINTS] = {810, 0, 0, 0};
+uint16_t remoteMapMaxs[N_JOINTS] = {500, 0, 0, 0};
+bool remoteJointEnabled[N_JOINTS] = {true, false, false, false};
 
 #define POT_DEADBAND_PERCENT 10
 #define POT_DEADBAND_MIN 50
@@ -74,6 +79,7 @@ Servo sholderRotateF;
 Servo sholderRotateB;
 Servo ratchetServosF[] = {lowerArmF, upperArmF, sholderSideF, sholderRotateF};
 Servo ratchetServosB[] = {lowerArmB, upperArmB, sholderSideB, sholderRotateB};
+bool jointUsesRatchets[] = {true, true, false, false};
 
 #define RATCHET_WAIT_MS 400
 #define RATCHET_POWER_N_INCREMENTS 3
@@ -97,12 +103,11 @@ byte motorServoPins[] = {30, 31, 32, 33, 34, 35, 36, 37};
 #define bluetooth Serial2
 
 bool useRemoteMode = false;
-
-uint16_t remoteLowerArmVal = 0;
+uint16_t remoteJointVals[N_JOINTS];
+Metro reportToRemoteMetro = Metro(250);
 
 #define N_ANALOG_VALS 13
 uint16_t analogVals[N_ANALOG_VALS];
-uint16_t rawAnalogVals[N_ANALOG_VALS];
 
 int16_t lastMotorVals[4];
 int16_t motorVals[4];
@@ -143,8 +148,22 @@ void setup() {
 }
 
 void setMotorTo(byte motorI, int16_t motorVal) {
-  bool useRoboclaw = false;
+  if (motorI == 0) {
+    // PWM motor controller
+    motorVal = constrain(motorVal, -128, 128);
+    uint16_t pulseWidthMicrosA = 1500 + ((int32_t)motorVal * 500 >> 7);
+    uint16_t pulseWidthMicrosB = 1500 - ((int32_t)motorVal * 500 >> 7);
+    //Serial << "Writing " << pulseWidthMicros << "us to motors with val " << motorVal << " and analog vals " << analogVals[2] << " and " << analogVals[3] << endl;
+    motorServos[motorI * 2].write(pulseWidthMicrosA);
+    motorServos[motorI * 2 + 1].write(pulseWidthMicrosB);
+  } else {
+    motorVal = constrain(motorVal, -255, 255);
+    set53Motor(motorVal, motorI + 7); // motorI 1 is addr. 8, 2 is addr. 9.
+  }
+  
+  /*bool useRoboclaw = false;
   bool usePwmControl = true;
+  
   if (useRoboclaw) {
     motorVal = constrain(motorVal, -128, 128);
     if (motorVal < 0) {
@@ -155,16 +174,10 @@ void setMotorTo(byte motorI, int16_t motorVal) {
       roboclaw.BackwardM2(motorAddrs[motorI], motorVal);
     }
   } else if (usePwmControl) {
-    motorVal = constrain(motorVal, -128, 128);
-    uint16_t pulseWidthMicrosA = 1500 + ((int32_t)motorVal * 500 >> 7);
-    uint16_t pulseWidthMicrosB = 1500 - ((int32_t)motorVal * 500 >> 7);
-    //Serial << "Writing " << pulseWidthMicros << "us to motors with val " << motorVal << " and analog vals " << analogVals[2] << " and " << analogVals[3] << endl;
-    motorServos[motorI * 2].write(pulseWidthMicrosA);
-    motorServos[motorI * 2 + 1].write(pulseWidthMicrosB);
+    
   } else {
-    motorVal = constrain(motorVal, -255, 255);
-    set53Motor(motorVal, motorI);
-  }
+    
+  }*/
 }
 
 // only valid if digitalRead(servoPin) == HIGH.
@@ -285,11 +298,11 @@ int16_t boundsManageFor(byte motorI, int16_t motorVal, uint16_t potVal) {
   uint16_t potMax = potMaxs[motorI];
   
   if (potVal < potMin - POT_OK_MIN_EXT || potVal > potMax + POT_OK_MAX_EXT) {
-    return 0; // disable for safety
+    return 0; // disable for safety, out of normal operating bounds
   }
 
-  uint16_t potMinH = potMin + POT_DEADBAND_MIN;//POT_DEADBAND_PERCENT * potMin / 100;
-  uint16_t potMaxL = potMax - POT_DEADBAND_MAX;//POT_DEADBAND_PERCENT * potMax / 100;
+  uint16_t potMinH = potMin + POT_DEADBAND_MIN;
+  uint16_t potMaxL = potMax - POT_DEADBAND_MAX;
   uint16_t additionalPower = 0;
 
   if (holdOn[motorI]) {
@@ -354,7 +367,6 @@ void bulkAnalogRead() {
         newVal = 0;
       }
       analogVals[j] = newVal;
-      rawAnalogVals[j] = newVal;
     }
   } else {
     for (uint8_t j = 0; j < N_ANALOG_VALS - 1; j++) {
@@ -364,7 +376,6 @@ void bulkAnalogRead() {
       } else {
         newVal = 0;
       }
-      rawAnalogVals[j] = newVal;
       
       int32_t microsPassed = (int32_t)nowMicros - lastReadMicros;
       if (microsPassed >= 769) {
@@ -429,97 +440,101 @@ void forceBasedControl() {
 }
 
 void remoteBasedControl(bool shouldReport) {
-  static bool inMotion = false;
-  static int8_t motionDirection;
+  static bool inMotion[N_JOINTS];
+  static int8_t motionDirection[N_JOINTS];
   static uint32_t lastMotorUpdateMicros;
-  static uint16_t lastRawPotVal;
 
-  uint16_t constrainedRemoteVal;
-  if (REMOTE_LOWER_ARM_MAP_MIN < REMOTE_LOWER_ARM_MAP_MAX) {
-    constrainedRemoteVal = constrain(remoteLowerArmVal, REMOTE_LOWER_ARM_MAP_MIN, REMOTE_LOWER_ARM_MAP_MAX);
-  } else {
-    constrainedRemoteVal = constrain(remoteLowerArmVal, REMOTE_LOWER_ARM_MAP_MAX, REMOTE_LOWER_ARM_MAP_MIN);
-  }
-  
-  uint16_t desiredPotVal = map(constrainedRemoteVal, REMOTE_LOWER_ARM_MAP_MIN, REMOTE_LOWER_ARM_MAP_MAX,
-                               potMins[LOWER_ARM_I] + POT_DEADBAND_MIN, potMaxs[LOWER_ARM_I] - POT_DEADBAND_MAX);
-
-  uint16_t currentPotVal = analogVals[potPins[LOWER_ARM_I]];
-
-  bool closeEnough = abs((int16_t)currentPotVal - (int16_t)desiredPotVal) <= (POT_DEADBAND_PERCENT * desiredPotVal) / 100;
-
-  if (!inMotion && closeEnough) {
-    return;
-  }
-  
-  if (!inMotion) {
-    if (desiredPotVal > currentPotVal) {
-      motionDirection = 1;
-    } else {
-      motionDirection = -1;
-    }
-    inMotion = true;
-    lastRawPotVal = rawAnalogVals[potPins[LOWER_ARM_I]];
-    Serial << "Starting action from " << currentPotVal << " to " << desiredPotVal << "\n";
-  }
-  
-  uint32_t nowMicros = micros();
-  if (nowMicros - lastMotorUpdateMicros > 5e3) {
-    int16_t newMotorVal = 0;
-    int16_t error = (int16_t)desiredPotVal - (int16_t)currentPotVal;//(int16_t)rawAnalogVals[potPins[LOWER_ARM_I]];
-    if (!closeEnough) {
-      newMotorVal = error * motorProportion[LOWER_ARM_I] >> 7;
-      if (newMotorVal < 0) {
-        newMotorVal -= motorMinMove[LOWER_ARM_I];
-        newMotorVal = max(-128, newMotorVal);
-      } else {
-        newMotorVal += motorMinMove[LOWER_ARM_I];
-        newMotorVal = min(128, newMotorVal);
-      }
-
-      int16_t derivative = (int32_t)(error - lastErrors[LOWER_ARM_I]) * (int32_t)motorDerivative[LOWER_ARM_I] >> 7;
-      if ((newMotorVal > 0 && derivative < -newMotorVal) ||
-          (newMotorVal < 0 && derivative > -newMotorVal)) {
-        Serial << "limited " << derivative << " to " << -newMotorVal << endl;
-        derivative = -newMotorVal;
-      }
-      newMotorVal += derivative;
-      Serial << "goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[LOWER_ARM_I]) << " dTerm: " << derivative  << " total: " << newMotorVal << endl;
-    } else {
-      Serial << "close w/ goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[LOWER_ARM_I])  << " total: " << newMotorVal << endl;
-    }
-    lastErrors[LOWER_ARM_I] = error;
-
-    int16_t lastMotorVal = lastMotorVals[LOWER_ARM_I];
-    // break through dynamic friction
-    if (lastMotorVal == 0) {
-      if (newMotorVal > 0) {
-        lastMotorVal = motorMinMove[LOWER_ARM_I] >> 1;
-      } else {
-        lastMotorVal = -motorMinMove[LOWER_ARM_I] >> 1;
-      }
+  for (uint8_t motorI = 0; motorI < N_JOINTS; motorI++) {
+    if (!remoteJointEnabled[motorI]) {
+      continue;
     }
     
-    int8_t convergenceAdjustment = 0;
-    if (newMotorVal > lastMotorVal) {
-      convergenceAdjustment = 31;
-    } else if (newMotorVal < lastMotorVal) {
-      convergenceAdjustment = -31;
+    uint16_t constrainedRemoteVal;
+    if (remoteMapMins[motorI] < remoteMapMaxs[motorI]) {
+      constrainedRemoteVal = constrain(remoteJointVals[motorI], remoteMapMins[motorI], remoteMapMaxs[motorI]);
+    } else {
+      constrainedRemoteVal = constrain(remoteJointVals[motorI], remoteMapMaxs[motorI], remoteMapMins[motorI]);
     }
-    motorVals[LOWER_ARM_I] = (lastMotorVal * 30 + (newMotorVal << 1) + convergenceAdjustment) >> 5;
-    lastMotorUpdateMicros = nowMicros;
-  } else {
-    motorVals[LOWER_ARM_I] = lastMotorVals[LOWER_ARM_I];
-  }
-
-  if (closeEnough && motorVals[LOWER_ARM_I] == 0) {
-    inMotion = false;
-    Serial << "Target location reached.\n";
-    return;
-  }
-
-  if (shouldReport) {
-    Serial << "Target pot val: " << desiredPotVal << " Last motor val: " << lastMotorVals[LOWER_ARM_I] << " ";
+    
+    uint16_t desiredPotVal = map(constrainedRemoteVal, remoteMapMins[motorI], remoteMapMaxs[motorI],
+                                 potMins[motorI] + POT_DEADBAND_MIN, potMaxs[motorI] - POT_DEADBAND_MAX);
+  
+    uint16_t currentPotVal = analogVals[potPins[motorI]];
+  
+    bool closeEnough = abs((int16_t)currentPotVal - (int16_t)desiredPotVal) <= (POT_DEADBAND_PERCENT * desiredPotVal) / 100;
+  
+    if (!inMotion[motorI] && closeEnough) {
+      continue;
+    }
+    
+    if (!inMotion[motorI]) {
+      if (desiredPotVal > currentPotVal) {
+        motionDirection[motorI] = 1;
+      } else {
+        motionDirection[motorI] = -1;
+      }
+      inMotion[motorI] = true;
+      Serial << motorI << ": Starting action from " << currentPotVal << " to " << desiredPotVal << "\n";
+    }
+    
+    uint32_t nowMicros = micros();
+    if (nowMicros - lastMotorUpdateMicros > 5e3) {
+      int16_t newMotorVal = 0;
+      int16_t error = (int16_t)desiredPotVal - (int16_t)currentPotVal;
+      if (!closeEnough) {
+        newMotorVal = error * motorProportion[motorI] >> 7;
+        if (newMotorVal < 0) {
+          newMotorVal -= motorMinMove[motorI];
+          newMotorVal = max(-128, newMotorVal);
+        } else {
+          newMotorVal += motorMinMove[motorI];
+          newMotorVal = min(128, newMotorVal);
+        }
+  
+        int16_t derivative = (int32_t)(error - lastErrors[motorI]) * (int32_t)motorDerivative[motorI] >> 7;
+        if ((newMotorVal > 0 && derivative < -newMotorVal) ||
+            (newMotorVal < 0 && derivative > -newMotorVal)) {
+          Serial << motorI << ": limited " << derivative << " to " << -newMotorVal << endl;
+          derivative = -newMotorVal;
+        }
+        newMotorVal += derivative;
+        Serial << motorI << ": goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[motorI]) << " dTerm: " << derivative  << " total: " << newMotorVal << endl;
+      } else {
+        Serial << motorI << ": close w/ goal: " << desiredPotVal << " current: " << currentPotVal << " error: " << error << " delta error: " << (error - lastErrors[motorI])  << " total: " << newMotorVal << endl;
+      }
+      lastErrors[motorI] = error;
+  
+      int16_t lastMotorVal = lastMotorVals[motorI];
+      // break through dynamic friction
+      if (lastMotorVal == 0) {
+        if (newMotorVal > 0) {
+          lastMotorVal = motorMinMove[motorI] >> 1;
+        } else {
+          lastMotorVal = -motorMinMove[motorI] >> 1;
+        }
+      }
+      
+      int8_t convergenceAdjustment = 0;
+      if (newMotorVal > lastMotorVal) {
+        convergenceAdjustment = 31;
+      } else if (newMotorVal < lastMotorVal) {
+        convergenceAdjustment = -31;
+      }
+      motorVals[motorI] = (lastMotorVal * 30 + (newMotorVal << 1) + convergenceAdjustment) >> 5;
+      lastMotorUpdateMicros = nowMicros;
+    } else {
+      motorVals[motorI] = lastMotorVals[motorI];
+    }
+  
+    if (closeEnough && motorVals[motorI] == 0) {
+      inMotion[motorI] = false;
+      Serial << motorI << ": Target location reached.\n";
+      continue;
+    }
+  
+    if (shouldReport) {
+      Serial << motorI << ": Target pot val: " << desiredPotVal << " Last motor val: " << lastMotorVals[motorI] << " ";
+    }
   }
 }
 
@@ -534,39 +549,62 @@ int16_t timedRead(Stream &stream) {
   return -1;
 }
 
-void handleBluetooth() {
-  while (Serial.available()) {
-    char c = Serial.read();
-    bluetooth << c;
+void sendValFrame(Stream &stream, uint16_t *vals, uint8_t numVals) {
+  stream.write(FRAME_START_BYTE);
+  for (uint8_t i = 0; i < numVals; i++) {
+    stream.write((vals[i] >> 8) & 0xff);
+    stream.write(vals[i] & 0xff);
+    stream.write((vals[i] >> 8) & 0xff);
+    stream.write(vals[i] & 0xff);
   }
-  while (bluetooth.available()) {
-    byte start = bluetooth.read();
-    if (start != FRAME_START_BYTE) {
-      if (start != 0) {
-        Serial << "ignore bluetooth val: " << (char)start << " or " << (byte)start << endl;
-      }
-      continue;
+  stream.write(FRAME_END_BYTE);
+}
+
+void attemptBluetoothRead() {
+  uint16_t receivedVals[N_JOINTS];
+  
+  byte start = bluetooth.read();
+  if (start != FRAME_START_BYTE) {
+    if (start != 0) {
+      Serial << "ignore bluetooth val: " << (char)start << " or " << (byte)start << endl;
     }
-    
+    return;
+  }
+
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
     uint16_t val1 = (timedRead(bluetooth) << 8) | timedRead(bluetooth);
     uint16_t val2 = (timedRead(bluetooth) << 8) | timedRead(bluetooth);
     if (val1 != val2) {
       Serial << "bluetooth vals did not match: " << val1 << " != " << val2 << endl;
-      continue;
+      return;
     }
-    byte endByte = timedRead(bluetooth);
-    if (endByte != FRAME_END_BYTE) {
-      Serial << "bluetooth frame end failed. instead got: " << endByte << endl;
-      Serial << "had just gotten vals: " << val1 << " and " << val2 << endl;
-      continue;
-    }
+    receivedVals[i] = val1;
+  }
+  
+  byte endByte = timedRead(bluetooth);
+  if (endByte != FRAME_END_BYTE) {
+    Serial << "bluetooth frame end failed. instead got: " << endByte << endl;
+    return;
+  }
 
-    remoteLowerArmVal = val1;
-    //Serial << remoteLowerArmVal << endl;
-    if (!useRemoteMode && remoteLowerArmVal != 0) {
-      useRemoteMode = true;
-      Serial << "Remote control mode enabled.\n";
-    }
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    remoteJointVals[i] = receivedVals[i];
+    //Serial << remoteJointVals[i << endl;
+  }
+  
+  if (!useRemoteMode) {
+    useRemoteMode = true;
+    Serial << "Remote control mode enabled.\n";
+  }
+}
+
+void handleBluetooth() {
+  if (useRemoteMode && reportToRemoteMetro.check()) {
+    sendValFrame(bluetooth, &analogVals[potPins[0]], N_JOINTS);
+  }
+  
+  while (bluetooth.available()) {
+    attemptBluetoothRead();
   }
 }
 
@@ -591,11 +629,13 @@ void loop() {
   for (uint8_t i = 0; i < N_JOINTS; i++) {
     motorVals[i] = 0;
   }
-  
-  if (useRemoteMode) {
-    remoteBasedControl(shouldReport);
-  } else {
-    forceBasedControl();
+
+  if (digitalRead(ARM_ALL_ENABLE_PIN)) {
+    if (useRemoteMode) {
+      remoteBasedControl(shouldReport);
+    } else {
+      forceBasedControl();
+    }
   }
 
   if (shouldReport) {
@@ -610,8 +650,11 @@ void loop() {
     
     if (motorVals[i] != lastMotorVals[i]) {
       lastMotorVals[i] = motorVals[i];
+
+      if (jointUsesRatchets[i]) {
+        manageRatchetFor(i);
+      }
       
-      manageRatchetFor(i);
       setMotorTo(i, motorVals[i]);
     }
   }
@@ -628,7 +671,10 @@ void loop() {
   }
 
   if (shouldReport) {
-    Serial << "Remote val: " << remoteLowerArmVal << " ";
+    Serial << "Remote vals: ";
+    for (uint8_t i = 0; i < N_JOINTS; i++) {
+      Serial << remoteJointVals[i] << " ";
+    } 
     Serial << "Top Force: " << lowerTop << " Bottom Force: " << lowerBottom;// << " Pot: " << lowerArmPot;
     Serial << " Pots: ";
     for (uint8_t i = 0; i < N_JOINTS; i++) {
@@ -640,7 +686,10 @@ void loop() {
       Serial << motorVals[i] << " ";
     }
     Serial << " Ratchets: ";
-    for (uint8_t i = 0; i < 1; i++) {
+    for (uint8_t i = 0; i < N_JOINTS; i++) {
+      if (!jointUsesRatchets[i]) {
+        continue;
+      }
       Serial << i << "F:" << (fRatchetOpen[i] ? "open" : "closed") << (servoStatusOpen[i * 2 + 1] == LOW ? "(inverted)" : "") << ", ";
       Serial << "B:" << (bRatchetOpen[i] ? "open" : "closed") << (servoStatusOpen[i * 2] == LOW ? "(inverted)" : "") << ", ";
     }

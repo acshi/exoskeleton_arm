@@ -8,24 +8,16 @@
 Metro reportMetro = Metro(50);
 AltSoftSerial bluetooth; // Rx (8), Tx (9) (connect to bluetooth's Tx-O, Rx-I)
 
+
+#define N_JOINTS 4
+uint16_t jointVals[N_JOINTS];
+
 // ADC prescalers
 // from http://www.microsmart.co.za/technical/2014/03/01/advanced-arduino-adc/
 const unsigned char PS_16 = (1 << ADPS2);
 const unsigned char PS_32 = (1 << ADPS2) | (1 << ADPS0);
 const unsigned char PS_64 = (1 << ADPS2) | (1 << ADPS1);
 const unsigned char PS_128 = (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
-
-/*void waitForBluetooth() {
-  while (!bluetooth.available()) {
-    if (Serial.available()) {
-      bluetooth << (char)Serial.read();
-    }
-  }
-  while (bluetooth.available()) {
-    Serial << (char)bluetooth.read();
-    delay(2);
-  }
-}*/
 
 void setup() {
   Serial.begin(9600);
@@ -36,29 +28,39 @@ void setup() {
   
   bluetooth.begin(9600);
 
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    jointVals[i] = 0xffff;
+  }
+
   Serial << "Ready!\n";
 }
 
-void sendValFrame(Stream &stream, uint16_t val) {
+void sendValFrame(Stream &stream, uint16_t *vals, uint8_t numVals) {
   stream.write(FRAME_START_BYTE);
-  stream.write((val >> 8) & 0xff);
-  stream.write(val & 0xff);
-  stream.write((val >> 8) & 0xff);
-  stream.write(val & 0xff);
+  for (uint8_t i = 0; i < numVals; i++) {
+    stream.write((vals[i] >> 8) & 0xff);
+    stream.write(vals[i] & 0xff);
+    stream.write((vals[i] >> 8) & 0xff);
+    stream.write(vals[i] & 0xff);
+  }
   stream.write(FRAME_END_BYTE);
 }
 
 void loop() {
-  static uint16_t jointVal = 0xffff;
-  if (jointVal == 0xffff) {
-    jointVal = analogRead(0);
-  } else {
-    jointVal = (jointVal * 20 + (analogRead(0) * 12)) >> 5;
+  for (uint8_t i = 0; i < N_JOINTS; i++) {
+    if (jointVals[i] == 0xffff) {
+      jointVals[i] = analogRead(i);
+    } else {
+      jointVals[i] = (jointVals[i] * 20 + (analogRead(i) * 12)) >> 5;
+    }
   }
 
   if (reportMetro.check()) {
-    sendValFrame(bluetooth, jointVal);
-    Serial << jointVal << endl;
+    sendValFrame(bluetooth, jointVals, N_JOINTS);
+    for (uint8_t i = 0; i < N_JOINTS; i++) {
+      Serial << jointVals[i] << " ";
+    }
+    Serial << endl;
   }
 
   while (bluetooth.available()) {

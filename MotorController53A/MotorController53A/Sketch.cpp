@@ -28,18 +28,20 @@
 #define ERR_OVERCURRENT 1
 #define ERR_VDS_FAULT 2
 
+#define MSG_MARK_BYTE 0xfe
+
 uint8_t twiAddress = 0;
 
 uint8_t adcOffsetError = 0;
 
-#define MAX_CURRENT_LIMIT 3723 // maximum ~100A limit
+#define MAX_CURRENT_LIMIT 7500 // maximum ~100A limit
 // 1mohm resistance across the sense from ground, using 10x gain and 1.1V reference and virtual 12-bit ADC
-uint16_t currentLimit = 1117; // default ~30A limit
+uint16_t currentLimit = 2250; // default ~30A limit
 uint16_t currentVal = 0;
 
 // we interface with the outside world using 10 milliamps as the unit
-#define CURRENT_10MA_TO_VAL(val) ((val * 3 + 4) >> 3)
-#define CURRENT_VAL_TO_10MA(val) (((val << 3) + 1) / 3)
+#define CURRENT_10MA_TO_VAL(val) ((val * 3 + 2) >> 2)
+#define CURRENT_VAL_TO_10MA(val) (((val << 2) + 1) / 3)
 
 // Communication
 #define SET_MOTOR_MSG 1
@@ -87,7 +89,7 @@ void setupTimerInterrupts() {
 // So our smallest output voltage is 5V * 1 / 256.
 // as such, this is only for a very rough extra safety measure. We do finer current control ourselves.
 void updateCurrentLimit() {
-    Timer1_SetOutputCompareMatchB((CURRENT_VAL_TO_10MA(currentLimit) * 131) >> 8);
+    Timer1_SetOutputCompareMatchB((currentLimit * 7 + 512) >> 10);
 }
 
 // Does a raw ADC reading with whatever settings are already set
@@ -107,7 +109,7 @@ uint16_t readVirtual12BitAdc() {
 }
 
 uint16_t readSense() {
-    ADMUX = (0b10000000 | SENSE_ADC);
+    ADMUX = (0b10000000 | SENSE_ADC); // 1.1V internal reference plus ADC
     // throw away first read
     readAdc();
 
@@ -136,7 +138,7 @@ void setupAdc() {
     uint16_t settleStart = millis16();
     while ((uint8_t)(millis16() - settleStart) < 1) {}
 
-    adcOffsetError = (uint8_t)readSense();
+    //adcOffsetError = (uint8_t)readSense();
 }
 
 void updateMotor() {
@@ -144,15 +146,21 @@ void updateMotor() {
         lastMotorOutput = motorOutput;
         MOTOR_OFF();
         Timer0_SetCompareOutputModeB(Timer0_Disconnected);
+        if (motorOutput == 0) {
+            return;
+        }
         if (motorOutput < 0) {
             PHASE_ON();
             Timer0_SetOutputCompareMatchB(-motorOutput);
-            Timer0_SetCompareOutputModeB(Timer0_Clear);
         } else if (motorOutput > 0) {
             PHASE_OFF();
             Timer0_SetOutputCompareMatchB(motorOutput);
-            Timer0_SetCompareOutputModeB(Timer0_Clear);
         }
+
+        uint16_t settleStart = millis16();
+        while ((uint8_t)(millis16() - settleStart) < 1) {}
+
+        Timer0_SetCompareOutputModeB(Timer0_Clear);
     }
 }
 
@@ -180,6 +188,7 @@ void updateCurrentControl() {
 }
 
 void send16bits(uint16_t val) {
+    TinyWireS.send(MSG_MARK_BYTE);
     TinyWireS.send((val >> 8) & 0xff);
     TinyWireS.send(val & 0xff);
 }
@@ -289,6 +298,10 @@ void setup() {
     DDRB = 0b11111000;
     PORTA = 0b00001100;
     PORTB = 0b00000011;
+
+    // let values settle
+    uint16_t settleStart = millis16();
+    while ((uint8_t)(millis16() - settleStart) < 1) {}
 
     // Our address range is 8 to 23 because 0 to 7 are reserved.
     uint8_t addr = 23;

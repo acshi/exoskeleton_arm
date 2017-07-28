@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <Streaming.h>
 
 #define SET_MOTOR_MSG 1
 #define READ_MOTOR_MSG 2
@@ -10,11 +11,11 @@
 #define ADDRESS_MSG 12
 #define MSG_END_BYTE 0xed
 #define VAL_END_BYTE 0xec
-
+#define MSG_MARK_BYTE 0xfe
 
 uint16_t send53ReadMessage(uint8_t command, int address);
 void send53MessageValue(uint8_t command, int16_t value, int address);
-void flushTwi(int address);
+bool flushTwi(int address);
 
 #define set53Motor(VAL, ADDR) send53MessageValue(SET_MOTOR_MSG, VAL, ADDR)
 #define read53Motor(ADDR) send53ReadMessage(READ_MOTOR_MSG, ADDR)
